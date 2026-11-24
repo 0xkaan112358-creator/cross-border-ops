@@ -34,20 +34,47 @@ export async function getViewer(): Promise<Viewer | null> {
   return resolveViewer(await headers());
 }
 
-function crossOrigin(request: Request) {
-  if (request.method === "GET" || request.method === "HEAD") return false;
-  const origin = request.headers.get("origin");
-  const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
-  if (!origin || !host) return false;
-  try {
-    return new URL(origin).host !== host;
-  } catch {
-    return true;
+function requestHosts(h: Headers) {
+  const hosts = new Set<string>();
+  for (const value of [h.get("x-forwarded-host"), h.get("host")]) {
+    for (const part of value?.split(",") ?? []) if (part.trim()) hosts.add(part.trim().toLowerCase());
   }
+  for (const m of h.get("forwarded")?.matchAll(/host="?([^;,"\s]+)/gi) ?? []) hosts.add(m[1].toLowerCase());
+  return hosts;
+}
+
+// Returns a short diagnostic when the request must be rejected as cross-site, otherwise null.
+// Sec-Fetch-Site is set by the browser and cannot be forged by another page, so it is trusted first;
+// behind proxies that rewrite Host it is the only reliable same-origin signal.
+function crossOriginReason(request: Request): string | null {
+  if (request.method === "GET" || request.method === "HEAD") return null;
+  const h = request.headers;
+  const site = h.get("sec-fetch-site");
+  if (site === "same-origin" || site === "none") return null;
+  if (site === "cross-site" || site === "same-site") return `sec-fetch-site=${site}`;
+  const origin = h.get("origin");
+  if (!origin) return null;
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host.toLowerCase();
+  } catch {
+    return `origin=${origin}`;
+  }
+  const hosts = requestHosts(h);
+  if (hosts.size === 0 || hosts.has(originHost)) return null;
+  return `origin=${originHost} host=${[...hosts].join("|")}`;
 }
 
 export async function requireViewer(request: Request, roles?: Role[]): Promise<Viewer | Response> {
-  if (crossOrigin(request)) return Response.json({ error: "请求来源不受信任" }, { status: 403 });
+  const rejected = crossOriginReason(request);
+  if (rejected) {
+    const h = request.headers;
+    console.warn(
+      `[csrf] 拒绝 ${request.method} ${new URL(request.url).pathname} ${rejected} ` +
+        `x-forwarded-host=${h.get("x-forwarded-host")} host=${h.get("host")} forwarded=${h.get("forwarded")} sec-fetch-site=${h.get("sec-fetch-site")}`,
+    );
+    return Response.json({ error: `请求来源不受信任（${rejected}）` }, { status: 403 });
+  }
   const viewer = await resolveViewer(request);
   if (!viewer) return Response.json({ error: "请先登录" }, { status: 401 });
   if (roles && !roles.includes(viewer.role)) {
