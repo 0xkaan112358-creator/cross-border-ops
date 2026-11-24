@@ -12,6 +12,7 @@ export async function POST(request: Request) {
   if (!parsed.success) return Response.json({ error: "请求格式不正确" }, { status: 400 });
   await tx(async (q) => {
     await clearBusinessData(q);
+    await q("delete from app_meta where key = 'data_source'");
     if (parsed.data.mode === "sample") {
       await seedSampleData(q);
       await seedSampleDocs(q);
