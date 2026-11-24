@@ -9,7 +9,7 @@ export function NoPermission({ need }: { need: string }) {
           <ShieldAlert />
         </EmptyMedia>
         <EmptyTitle>没有访问权限</EmptyTitle>
-        <EmptyDescription>这个页面仅{need}可以使用。如需开通，请联系管理员在"设置 &gt; 成员角色"中添加。</EmptyDescription>
+        <EmptyDescription>这个页面仅{need}可以使用。如需开通，请联系管理员在“设置 &gt; 成员角色”中添加。</EmptyDescription>
       </EmptyHeader>
     </Empty>
   );
