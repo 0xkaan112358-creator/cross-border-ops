@@ -39,10 +39,6 @@ const fbaStock = [
     sid: 0, name: "欧洲共享仓", seller_sku: "LAMP-01-EU", sku: "LAMP-01", asin: "B0MOCK0003", product_name: "台灯", share_type: 2,
     afn_fulfillable_quantity: 300, total_fulfillable_quantity: 300, afn_inbound_receiving_quantity: 50, afn_inbound_shipped_quantity: 200,
     inv_age_181_to_270_days: 0, inv_age_271_to_365_days: 0, inv_age_365_plus_days: 0,
-    fba_storage_quantity_list: [
-      { sid: 103, name: "Acme-DE", quantity_for_local_fulfillment: 220 },
-      { sid: 104, name: "Acme-FR", quantity_for_local_fulfillment: 80 },
-    ],
   },
   { sid: 105, name: "Acme-JP日本仓", seller_sku: "BOT-750-JP", sku: "BOT-750", asin: "B0MOCK0001", product_name: "保温杯", share_type: 0, afn_fulfillable_quantity: 50, total_fulfillable_quantity: 50 },
 ];
@@ -129,7 +125,10 @@ function page(rows, body, defLen) {
 }
 
 const lingxing = {
-  "/basicOpen/openapi/storage/fbaWarehouseDetail": (b) => ({ code: 0, message: "success", total: fbaStock.length, data: page(fbaStock, b, 20) }),
+  "/basicOpen/openapi/storage/fbaWarehouseDetail": (b) =>
+    b.query_fba_storage_quantity_list !== undefined
+      ? { status: 400, code: 400, message: "当前本地模拟查询不支持 query_fba_storage_quantity_list：未接通欧洲共享仓实时来源" }
+      : { code: 0, message: "success", total: fbaStock.length, data: page(fbaStock, b, 20) },
   "/erp/sc/routing/data/local_inventory/inventoryDetails": (b) => ({ code: 0, message: "success", total: localStock.length, data: page(localStock, b, 20) }),
   "/erp/sc/routing/data/local_inventory/purchaseOrderList": (b) => ({ code: 0, message: "success", total: purchaseOrders.length, data: page(purchaseOrders, b, 500) }),
   "/erp/sc/routing/storage/shipment/getInboundShipmentList": (b) => {
@@ -160,7 +159,10 @@ const server = http.createServer((req, res) => {
     }
     const auth = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
     if (!auth || !(tokens.get(auth) > Date.now())) return send(res, 401, { code: 401, message: "需要有效登录会话", data: null });
-    if (lingxing[url.pathname] && req.method === "POST") return send(res, 200, lingxing[url.pathname](body));
+    if (lingxing[url.pathname] && req.method === "POST") {
+      const out = lingxing[url.pathname](body);
+      return send(res, out.status ?? 200, out);
+    }
     if (rest[url.pathname] && req.method === "GET") {
       const limit = Number(url.searchParams.get("limit") ?? 20);
       const offset = Number(url.searchParams.get("offset") ?? 0);

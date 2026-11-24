@@ -45,11 +45,7 @@ const rowsOf = (json: unknown): { rows: Row[]; total?: number } => {
 async function fetchSnapshot(client: ErpClient, today: string): Promise<ErpSnapshot> {
   const products = await client.listAll<Row>("api/v1/products");
   const warehouses = await client.listAll<Row>("api/v1/warehouses");
-  const fbaStock = await client.paginate<Row>(
-    "basicOpen/openapi/storage/fbaWarehouseDetail",
-    { query_fba_storage_quantity_list: true },
-    { pageSize: 200, pick: rowsOf },
-  );
+  const fbaStock = await client.paginate<Row>("basicOpen/openapi/storage/fbaWarehouseDetail", {}, { pageSize: 200, pick: rowsOf });
   const localStock = await client.paginate<Row>("erp/sc/routing/data/local_inventory/inventoryDetails", {}, { pageSize: 800, pick: rowsOf });
   const purchaseOrders = await client.paginate<Row>(
     "erp/sc/routing/data/local_inventory/purchaseOrderList",

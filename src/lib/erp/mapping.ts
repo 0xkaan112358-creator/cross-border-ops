@@ -123,6 +123,26 @@ const SHIPPED_ORDER_STATUS: Record<string, string> = {
   cancelled: "已取消",
 };
 
+const SHARED_POOLS: Record<number, Marketplace[]> = {
+  1: ["US"],
+  2: ["DE", "FR", "IT", "ES"],
+};
+
+/** Splits an integer total by weights, giving leftover units to the largest remainders. */
+function splitByWeight(total: number, weights: number[]): number[] {
+  const sum = weights.reduce((a, b) => a + b, 0);
+  const raw = weights.map((w) => (total * w) / sum);
+  const out = raw.map(Math.floor);
+  let rest = total - out.reduce((a, b) => a + b, 0);
+  const order = raw.map((r, i) => ({ i, frac: r - Math.floor(r) })).sort((a, b) => b.frac - a.frac);
+  for (const { i } of order) {
+    if (rest <= 0) break;
+    out[i]++;
+    rest--;
+  }
+  return out;
+}
+
 function shipMethod(text: string) {
   if (/空运|air/i.test(text)) return "air";
   if (/铁路|卡航|rail|train/i.test(text)) return "rail";
@@ -239,6 +259,8 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     return { sku, marketplace: marketplace as Marketplace, date, units };
   });
 
+  const soldBySkuMp = new Map<string, number>();
+  for (const s of sales) soldBySkuMp.set(keyOf(s.sku, s.marketplace), (soldBySkuMp.get(keyOf(s.sku, s.marketplace)) ?? 0) + s.units);
   // FBA stock. Shared (pan-EU / NA) rows come back with sid 0 and are split by the per-store list when present.
   for (const f of snap.fbaStock) {
     const sku = localSku(f, "seller_sku");
@@ -273,6 +295,32 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
       }
     }
     mp ??= guessMarketplace(f.name);
+    if (!mp && str(f.sid) === "0" && SHARED_POOLS[num(f.share_type)]) {
+      const pool = SHARED_POOLS[num(f.share_type)];
+      const sold = pool.map((m) => soldBySkuMp.get(keyOf(sku, m)) ?? 0);
+      const hasSales = sold.some((x) => x > 0);
+      const targets = hasSales ? pool.filter((_, i) => sold[i] > 0) : [pool[0]];
+      const weights = hasSales ? sold.filter((x) => x > 0) : [1];
+      const parts = {
+        fba_available: splitByWeight(fulfillable, weights),
+        fba_inbound: splitByWeight(num(f.afn_inbound_receiving_quantity), weights),
+        in_transit: splitByWeight(num(f.afn_inbound_shipped_quantity), weights),
+        aged_qty: splitByWeight(aged, weights),
+      };
+      targets.forEach((m, i) => {
+        const v = inv(touch(sku, m, f.asin, f.product_name));
+        v.fba_available += parts.fba_available[i];
+        v.fba_inbound += parts.fba_inbound[i];
+        v.in_transit += parts.in_transit[i];
+        v.aged_qty += parts.aged_qty[i];
+      });
+      warnings.add(
+        "fba_shared_split",
+        "共享仓库存没有按店铺拆分的数据，已按各站点近 60 天销量比例分摊（欧洲共享仓分摊到德/法/意/西，没有销量时计入德国站；北美共享仓计入美国站）",
+        `${sku}：${targets.map((m, i) => `${m} ${parts.fba_available[i]}`).join(" / ")}`,
+      );
+      continue;
+    }
     if (!mp) {
       warnings.add("fba_no_marketplace", "FBA 库存无法识别站点，已跳过", `${sku}（${str(f.name) || `sid ${str(f.sid)}`}）`);
       continue;
@@ -322,8 +370,6 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
 
   // Marketplace a SKU's non-store-specific stock (domestic warehouse, purchase orders) is attributed to:
   // the one with the most units sold in the window, then US, then any.
-  const soldBySkuMp = new Map<string, number>();
-  for (const s of sales) soldBySkuMp.set(keyOf(s.sku, s.marketplace), (soldBySkuMp.get(keyOf(s.sku, s.marketplace)) ?? 0) + s.units);
   const primaryMarketplace = (sku: string): Marketplace | null => {
     const candidates = [...skuMeta.values()].filter((m) => m.sku === sku);
     if (!candidates.length) return null;
