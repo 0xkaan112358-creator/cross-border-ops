@@ -113,15 +113,26 @@ class Warnings {
   }
 }
 
-const SHIPPED_ORDER_STATUS: Record<string, string> = {
+const ORDER_STATUS: Record<string, string> = {
   shipped: "已发货",
+  已发货: "已发货",
   partiallyshipped: "部分发货",
+  部分发货: "部分发货",
   unshipped: "待发货",
   pending: "待发货",
   pendingavailability: "待发货",
+  待发货: "待发货",
+  待审核: "待审核",
   canceled: "已取消",
   cancelled: "已取消",
+  已取消: "已取消",
 };
+
+export function normalizeOrderStatus(raw: unknown): string | null {
+  const s = str(raw);
+  if (!s) return null;
+  return ORDER_STATUS[s.toLowerCase().replace(/[\s_-]/g, "")] ?? s;
+}
 
 const SHARED_POOLS: Record<number, Marketplace[]> = {
   1: ["US"],
@@ -172,7 +183,10 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
   for (const [, e] of stores) {
     if (e.votes.size === 0) {
       const mp = guessMarketplace(e.name);
-      if (mp) e.votes.set(mp, 1);
+      if (mp) {
+        e.votes.set(mp, 1);
+        e.source = "店铺名称";
+      }
     }
   }
   const storeMarketplace = new Map<string, Marketplace | null>();
@@ -228,7 +242,7 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     const date = dateOf(o.purchase_date_local) ?? dateOf(o.purchase_date);
     const items = (o.item_list as Row[] | undefined) ?? [];
     const firstSku = items.length ? localSku(items[0], "seller_sku") : "";
-    const mapped = SHIPPED_ORDER_STATUS[status.toLowerCase().replace(/[^a-z]/g, "")] ?? (status || null);
+    const mapped = normalizeOrderStatus(status);
     if (str(o.amazon_order_id)) {
       orders.push({
         order_id: str(o.amazon_order_id),
@@ -240,7 +254,7 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
         est_delivery: dateOf(o.estimated_arrival_date),
       });
     }
-    if (/cancel/i.test(status) || !date || date < salesStart || date >= today) continue;
+    if (mapped === "已取消" || !date || date < salesStart || date >= today) continue;
     if (!mp) {
       warnings.add("order_no_marketplace", "订单无法识别站点，未计入销量", str(o.amazon_order_id));
       continue;
@@ -294,7 +308,7 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
         continue;
       }
     }
-    mp ??= guessMarketplace(f.name);
+    mp ??= guessMarketplace(f.name) ?? guessMarketplace(f.seller_group_name);
     if (!mp && str(f.sid) === "0" && SHARED_POOLS[num(f.share_type)]) {
       const pool = SHARED_POOLS[num(f.share_type)];
       const sold = pool.map((m) => soldBySkuMp.get(keyOf(sku, m)) ?? 0);
@@ -391,10 +405,14 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     if (qty <= 0) continue;
     const wh = whById.get(str(r.wid));
     const type = str(wh?.warehouse_type);
-    const whName = str(wh?.name) || `仓库 ${str(r.wid)}`;
+    const whName = str(wh?.name) || (str(r.wid) ? `仓库 ID ${str(r.wid)}` : "（明细没有仓库 ID）");
     if (/fba|亚马逊|amazon/i.test(type)) continue;
-    if (/海外|overseas|第三方|third/i.test(type)) {
-      const mp = guessMarketplace(wh?.country) ?? guessMarketplace(whName);
+    // Country decides first: a warehouse located in a marketplace country is overseas stock for that marketplace,
+    // whatever its type label (海外仓 / 自营仓 / 平台仓); one in China is domestic.
+    const countryMp = guessMarketplace(wh?.country);
+    const inChina = /^(cn|chn|china|中国|中国大陆)$/i.test(str(wh?.country));
+    if (countryMp || (!inChina && /海外|overseas|第三方|third/i.test(type))) {
+      const mp = countryMp ?? guessMarketplace(whName);
       if (!mp) {
         warnings.add("overseas_no_marketplace", "海外仓无法识别国家，库存已跳过", whName);
         continue;

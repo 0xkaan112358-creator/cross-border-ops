@@ -28,7 +28,7 @@ export function decideRoute(input: RouteInput): RouteDecision {
     if (orderStatus === "已签收") {
       return { route: "human", reason: "物流显示已签收但客户仍在询问，可能丢件，需要人工核实" };
     }
-    if (orderStatus === "待发货" || orderStatus === "部分发货") {
+    if (orderStatus === "待发货" || orderStatus === "部分发货" || orderStatus === "待审核") {
       return { route: "human", reason: `订单状态为「${orderStatus}」，需要人工确认发货安排` };
     }
     if (orderStatus === "已取消") {

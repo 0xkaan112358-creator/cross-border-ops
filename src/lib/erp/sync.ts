@@ -84,6 +84,7 @@ function describeSnapshot(snap: ErpSnapshot): Record<string, [string, number][]>
     FBA库存按店铺: countBy(snap.fbaStock, (f) => `${label(f.sid, f.seller_group_name || f.name)}｜共享类型 ${String(f.share_type ?? "")}`),
     发货单明细按国家: countBy(lines, (r) => `${String(r.nation ?? "").trim() || "（空）"}｜${label(r.sid, r.sname)}`),
     仓库类型: countBy(snap.warehouses, (w) => `${String(w.warehouse_type ?? "").trim() || "（空）"}｜${String(w.country ?? "").trim() || "（无国家）"}`),
+    采购单按状态: countBy(snap.purchaseOrders, (po) => `${String(po.status ?? "（空）")} ${String(po.status_text ?? "").trim()}`.trim()),
     发货单按状态: countBy(snap.shipments, (s) => `${String(s.status ?? "（空）")} ${String(s.status_name ?? "").trim()}`.trim()),
     仓库库存明细按仓库: countBy(snap.localStock, (r) => {
       const wid = String(r.wid ?? "").trim();
