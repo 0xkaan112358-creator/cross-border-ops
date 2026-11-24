@@ -62,12 +62,12 @@ const INTENT_KEYWORDS: Record<Exclude<TicketIntent, "other">, RegExp[]> = {
     /退货|退款|换货/,
   ],
   logistics: [
-    /where is my (order|package|parcel)|tracking|not (arrived|received)|hasn'?t arrived|never (got|received)|delivery|delivered|shipped|package|parcel|arriv|status of my (order|package)/i,
+    /where is my (order|package|parcel)|when (will (it|my|the)|(it|my \w+|the \w+) will)|tracking|not (arrived|received)|hasn'?t arrived|never (got|received)|delivery|delivered|shipped|package|parcel|arriv|status of my (order|package)/i,
     /wo ist meine bestellung|sendung|lieferung|paket|nicht angekommen|ankommen/i,
     /où est ma commande|colis|livraison|suivi|pas reçu/i,
     /dov'è il mio ordine|pacco|consegna|spedizione|non è arrivato|tracciamento/i,
     /dónde está mi pedido|paquete|entrega|envío|no ha llegado|seguimiento/i,
-    /物流|快递|到货|包裹/,
+    /物流|快递|到货|包裹|什么时候(能)?到/,
   ],
   usage: [
     /how (do|to|can|long)|instructions?|manual|compatible|work with|set ?up|charge|clean|wash|can i|is it|does it|can the|cut/i,
