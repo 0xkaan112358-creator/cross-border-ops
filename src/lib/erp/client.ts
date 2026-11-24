@@ -189,6 +189,8 @@ function storeToken(key: string, data: Record<string, unknown>): TokenState {
 
 export class ErpClient {
   private calls = 0;
+  /** Per endpoint: rows fetched, the total the ERP reported, and pages requested. */
+  readonly fetchStats: Record<string, { fetched: number; total: number | null; pages: number }> = {};
 
   constructor(private readonly config: ErpConfig) {}
 
@@ -228,7 +230,15 @@ export class ErpClient {
     await login(this.config);
   }
 
-  /** Lingxing-style offset/length pagination. `pick` extracts the rows and total from one response. */
+  private record(path: string, fetched: number, total: number | null, pages: number) {
+    this.fetchStats[path] = { fetched, total, pages };
+    console.info(`[erp] ${path} 共拉取 ${fetched} 条，ERP 报告总数 ${total ?? "未提供"}，${pages} 页`);
+  }
+
+  /**
+   * Lingxing-style offset/length pagination. Advances by the rows actually returned and keeps going until the
+   * reported total is reached, so a server that caps the page size below the requested length is not truncated.
+   */
   async paginate<T>(
     path: string,
     body: Record<string, unknown>,
@@ -236,30 +246,43 @@ export class ErpClient {
   ): Promise<T[]> {
     const all: T[] = [];
     const maxRows = opts.maxRows ?? 50_000;
-    for (let offset = 0; ; offset += opts.pageSize) {
+    let reported: number | null = null;
+    let pages = 0;
+    for (let offset = 0; ; ) {
       const json = await this.post(path, { ...body, offset, length: opts.pageSize });
+      pages++;
       const { rows, total } = opts.pick(json);
+      if (total != null && Number.isFinite(Number(total))) reported = Number(total);
       all.push(...rows);
-      if (rows.length < opts.pageSize) break;
-      if (total != null && all.length >= total) break;
+      offset += rows.length;
+      if (rows.length === 0) break;
+      if (reported != null ? all.length >= reported : rows.length < opts.pageSize) break;
       if (all.length >= maxRows) throw new ErpError(`${path} 数据超过 ${maxRows} 条，请缩小同步范围`);
     }
+    this.record(path, all.length, reported, pages);
     return all;
   }
 
-  /** Local REST list endpoints (`items` + `total`, limit up to 100). */
+  /** Local REST list endpoints (`items` + `total`). */
   async listAll<T>(path: string, query: Record<string, string> = {}, maxRows = 50_000): Promise<T[]> {
     const all: T[] = [];
     const pageSize = 100;
-    for (let offset = 0; ; offset += pageSize) {
+    let reported: number | null = null;
+    let pages = 0;
+    for (let offset = 0; ; ) {
       const qs = new URLSearchParams({ ...query, limit: String(pageSize), offset: String(offset) });
       const json = (await this.get(`${path}?${qs}`)) as { items?: T[]; total?: number; data?: { items?: T[]; total?: number } };
+      pages++;
       const page = json.items ? json : (json.data ?? {});
       const rows = page.items ?? [];
+      if (page.total != null) reported = Number(page.total);
       all.push(...rows);
-      if (rows.length < pageSize || (page.total != null && all.length >= page.total)) break;
+      offset += rows.length;
+      if (rows.length === 0) break;
+      if (reported != null ? all.length >= reported : rows.length < pageSize) break;
       if (all.length >= maxRows) throw new ErpError(`${path} 数据超过 ${maxRows} 条，请缩小同步范围`);
     }
+    this.record(path, all.length, reported, pages);
     return all;
   }
 }

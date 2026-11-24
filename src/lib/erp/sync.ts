@@ -17,6 +17,8 @@ export type SyncSummary = {
   orders: number;
   deactivated: number;
   source: Record<string, number>;
+  fetchStats: Record<string, { fetched: number; total: number | null; pages: number }>;
+  breakdown: Record<string, [string, number][]>;
   stores: MappedData["storeMarketplaces"];
   requests: number;
   durationMs: number;
@@ -63,6 +65,25 @@ async function fetchSnapshot(client: ErpClient, today: string): Promise<ErpSnaps
     { pageSize: 1000, pick: rowsOf },
   );
   return { products, warehouses, fbaStock, localStock, purchaseOrders, shipments, orders };
+}
+
+function countBy(rows: Row[], key: (r: Row) => string, limit = 12): [string, number][] {
+  const m = new Map<string, number>();
+  for (const r of rows) m.set(key(r), (m.get(key(r)) ?? 0) + 1);
+  return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+}
+
+function describeSnapshot(snap: ErpSnapshot): Record<string, [string, number][]> {
+  const label = (sid: unknown, name: unknown) => `${String(name ?? "").trim() || "（无名称）"}｜sid ${String(sid ?? "")}`;
+  const lines = snap.shipments.flatMap((s) => (s.relate_list as Row[] | undefined) ?? []);
+  return {
+    订单按销售渠道: countBy(snap.orders, (o) => String(o.sales_channel ?? "").trim() || "（空）"),
+    订单按店铺: countBy(snap.orders, (o) => label(o.sid, o.seller_name)),
+    订单按状态: countBy(snap.orders, (o) => String(o.order_status ?? "").trim() || "（空）"),
+    FBA库存按店铺: countBy(snap.fbaStock, (f) => `${label(f.sid, f.seller_group_name || f.name)}｜共享类型 ${String(f.share_type ?? "")}`),
+    发货单明细按国家: countBy(lines, (r) => `${String(r.nation ?? "").trim() || "（空）"}｜${label(r.sid, r.sname)}`),
+    仓库类型: countBy(snap.warehouses, (w) => `${String(w.warehouse_type ?? "").trim() || "（空）"}｜${String(w.country ?? "").trim() || "（无国家）"}`),
+  };
 }
 
 async function writeData(q: Query, data: MappedData, today: string) {
@@ -191,7 +212,9 @@ export async function runErpSync(triggeredBy: string): Promise<SyncRun> {
   try {
     const snap = await fetchSnapshot(client, today);
     const source = Object.fromEntries(Object.entries(snap).map(([k, v]) => [k, (v as unknown[]).length]));
-    console.info(`[erp-sync] run=${runId} 拉取完成 ${JSON.stringify(source)}`);
+    const breakdown = describeSnapshot(snap);
+    console.info(`[erp-sync] run=${runId} 拉取完成 ${JSON.stringify(source)} stats=${JSON.stringify(client.fetchStats)}`);
+    console.info(`[erp-sync] run=${runId} 原始数据分布 ${JSON.stringify(breakdown)}`);
     const data = mapSnapshot(snap, today, SALES_DAYS);
     console.info(
       `[erp-sync] run=${runId} 映射完成 skus=${data.skus.length} sales=${data.sales.length} shipments=${data.shipments.length} orders=${data.orders.length} warnings=${data.warnings.map((w) => w.code).join(",")}`,
@@ -206,6 +229,8 @@ export async function runErpSync(triggeredBy: string): Promise<SyncRun> {
       orders: data.orders.length,
       deactivated: written.deactivated,
       source,
+      fetchStats: client.fetchStats,
+      breakdown,
       stores: data.storeMarketplaces,
       requests: client.requestCount,
       durationMs: Date.now() - started,

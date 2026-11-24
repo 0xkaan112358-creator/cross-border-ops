@@ -3,6 +3,8 @@
 import http from "node:http";
 
 const PORT = Number(process.env.MOCK_ERP_PORT || 19437);
+// Optional cap on rows per page, to mimic servers that return fewer rows than the requested length.
+const PAGE_CAP = Number(process.env.MOCK_ERP_PAGE_CAP || 0);
 const USER = "mock-admin";
 const PASS = "mock-pass";
 const tokens = new Map();
@@ -120,7 +122,7 @@ function send(res, status, body) {
 
 function page(rows, body, defLen) {
   const offset = Number(body.offset ?? 0);
-  const length = Number(body.length ?? defLen);
+  const length = PAGE_CAP ? Math.min(PAGE_CAP, Number(body.length ?? defLen)) : Number(body.length ?? defLen);
   return rows.slice(offset, offset + length);
 }
 

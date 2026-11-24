@@ -19,6 +19,16 @@ export type ErpOverview = {
   dataSource: "erp" | "local";
 };
 
+const SOURCE_LABEL: Record<string, string> = {
+  "api/v1/products": "产品列表",
+  "api/v1/warehouses": "仓库列表",
+  "basicOpen/openapi/storage/fbaWarehouseDetail": "FBA 库存",
+  "erp/sc/routing/data/local_inventory/inventoryDetails": "仓库库存明细",
+  "erp/sc/routing/data/local_inventory/purchaseOrderList": "采购单（近 365 天）",
+  "erp/sc/routing/storage/shipment/getInboundShipmentList": "已发货的发货单",
+  "erp/sc/data/mws/orders": "亚马逊订单（近 60 天）",
+};
+
 function Stat({ label, value }: { label: string; value: number | undefined }) {
   return (
     <div className="rounded-lg bg-muted/50 px-3 py-2">
@@ -84,6 +94,56 @@ function LastRun({ run }: { run: SyncRun }) {
               </li>
             ))}
           </ul>
+        </details>
+      )}
+      {s.fetchStats && (
+        <details className="rounded-lg bg-muted/40 p-3 text-xs">
+          <summary className="cursor-pointer list-none font-medium">ERP 原始数据（用于核对同步是否完整）</summary>
+          <table className="mt-2 w-full text-left">
+            <thead className="text-muted-foreground">
+              <tr>
+                <th className="py-1 pr-2 font-normal">接口</th>
+                <th className="py-1 pr-2 text-right font-normal">拉取条数</th>
+                <th className="py-1 pr-2 text-right font-normal">ERP 报告总数</th>
+                <th className="py-1 text-right font-normal">页数</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(s.fetchStats).map(([path, st]) => (
+                <tr key={path} className="border-t border-border/60">
+                  <td className="py-1 pr-2 break-all">{SOURCE_LABEL[path] ?? path}</td>
+                  <td className="py-1 pr-2 text-right tabular-nums">{st.fetched.toLocaleString()}</td>
+                  <td className={`py-1 pr-2 text-right tabular-nums ${st.total != null && st.total !== st.fetched ? "text-red-700" : ""}`}>
+                    {st.total == null ? "未提供" : st.total.toLocaleString()}
+                  </td>
+                  <td className="py-1 text-right tabular-nums">{st.pages}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {s.breakdown && (
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              {Object.entries(s.breakdown).map(([title, rows]) => (
+                <div key={title}>
+                  <div className="mb-1 font-medium">{title}</div>
+                  {rows.length === 0 ? (
+                    <div className="text-muted-foreground">无数据</div>
+                  ) : (
+                    <ul className="space-y-0.5">
+                      {rows.map(([k, n]) => (
+                        <li key={k} className="flex justify-between gap-2">
+                          <span className="truncate" title={k}>
+                            {k}
+                          </span>
+                          <span className="tabular-nums text-muted-foreground">{n.toLocaleString()}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </details>
       )}
       {s.stores && s.stores.length > 0 && (
