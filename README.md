@@ -6,7 +6,7 @@
 - **查询**：智能问答可以直接问库存、在途货件，以及平台规则、EPR、GPSR、认证等跨境合规标准。回答会标注数据和知识库来源。
 - **客服分拣**：AI 识别客户消息的语言、问题类型、情绪和紧急程度。物流查询、产品使用这类简单问题由 AI 起草回复；退换货、质量投诉、差评威胁、情绪激动或置信度低的消息转人工。发送前会做话术合规检查（禁止索要好评、以利益换评价、站外引流等）。
 
-一期不对接 ERP 和亚马逊消息接口：数据通过 Excel/CSV 导入，客服回复采用“复制并标记已回复”的方式发送。
+数据可以从 ERP 一键同步（领星风格接口），也可以通过 Excel/CSV 导入。一期不对接亚马逊消息接口，客服回复采用“复制并标记已回复”的方式发送。
 
 需求分析和产品需求文档在 [docs/](./docs/README.md) 目录。
 
@@ -39,6 +39,32 @@ npm run dev
 - DeepSeek：`LLM_BASE_URL=https://api.deepseek.com`，`LLM_MODEL=deepseek-chat`
 - 通义千问（阿里云百炼兼容模式）：`LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`，`LLM_MODEL=qwen-plus`
 - 智谱：`LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4`，`LLM_MODEL=glm-4-plus`
+
+## 对接 ERP
+
+配置以下环境变量后，管理员可以在“数据导入”页点“立即同步”，从 ERP 拉取产品、库存、采购待到货、在途发货单和近 60 天订单。未配置时继续使用示例数据或表格导入。
+
+| 变量 | 说明 |
+| --- | --- |
+| `ERP_BASE_URL` | ERP 接口地址，例如 `https://erp.example.com/lingxing-erp` |
+| `ERP_USERNAME` | ERP 管理员账号 |
+| `ERP_PASSWORD` | ERP 管理员密码 |
+| `ERP_TLS_FINGERPRINT` | ERP 使用自签名证书时填写证书的 SHA-256 指纹，系统只信任这张证书 |
+
+可以用下面的命令查看服务器证书的指纹：
+
+```bash
+echo | openssl s_client -connect erp.example.com:443 2>/dev/null | openssl x509 -noout -fingerprint -sha256
+```
+
+首次同步会清空示例业务数据。接口与数据的对应关系、同步规则和已知限制见 [docs/04-erp-integration.md](./docs/04-erp-integration.md)。
+
+本地没有 ERP 账号时，可以先启动模拟 ERP 再启动应用：
+
+```bash
+npm run mock-erp
+ERP_BASE_URL=http://127.0.0.1:19437 ERP_USERNAME=mock-admin ERP_PASSWORD=mock-pass npm run dev
+```
 
 ## 导入公司数据
 

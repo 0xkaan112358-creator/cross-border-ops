@@ -6,7 +6,8 @@
     "dev": "next dev -p 3747",
     "build": "next build && node scripts/migrate.mjs",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "mock-erp": "node scripts/mock-erp.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
