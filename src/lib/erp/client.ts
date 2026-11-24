@@ -187,10 +187,16 @@ function storeToken(key: string, data: Record<string, unknown>): TokenState {
   return state;
 }
 
+export type FetchStat = { fetched: number; total: number | null; pages: number; ms: number; done: boolean };
+
 export class ErpClient {
   private calls = 0;
-  /** Per endpoint: rows fetched, the total the ERP reported, and pages requested. */
-  readonly fetchStats: Record<string, { fetched: number; total: number | null; pages: number }> = {};
+  /** Per endpoint, updated after every page: rows fetched, the total the ERP reported, pages requested and time spent. */
+  readonly fetchStats: Record<string, FetchStat> = {};
+  /** Called when an endpoint starts or finishes (important) and after every page (not important). */
+  onPage?: (important: boolean) => void | Promise<void>;
+  /** Epoch ms after which no new request is started. */
+  deadline?: number;
 
   constructor(private readonly config: ErpConfig) {}
 
@@ -199,6 +205,9 @@ export class ErpClient {
   }
 
   private async call(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> {
+    if (this.deadline && Date.now() > this.deadline) {
+      throw new ErpError(`同步耗时超过上限，已在请求 ${path.split("?")[0]} 前停止，数据没有变化。各接口的进度和耗时见下方。`, 504);
+    }
     const started = Date.now();
     let token = await login(this.config);
     let r = await rawRequest(this.config, method, path, body, token.accessToken);
@@ -230,59 +239,70 @@ export class ErpClient {
     await login(this.config);
   }
 
-  private record(path: string, fetched: number, total: number | null, pages: number) {
-    this.fetchStats[path] = { fetched, total, pages };
-    console.info(`[erp] ${path} 共拉取 ${fetched} 条，ERP 报告总数 ${total ?? "未提供"}，${pages} 页`);
+  private async progress(path: string, fetched: number, total: number | null, ms: number, done: boolean) {
+    const prev = this.fetchStats[path];
+    this.fetchStats[path] = { fetched, total, pages: (prev?.pages ?? 0) + (done ? 0 : 1), ms: (prev?.ms ?? 0) + ms, done };
+    if (done) {
+      const st = this.fetchStats[path];
+      console.info(`[erp] ${path} 共拉取 ${fetched} 条，ERP 报告总数 ${total ?? "未提供"}，${st.pages} 页，${st.ms}ms`);
+    }
+    await this.onPage?.(done);
   }
 
   /**
-   * Lingxing-style offset/length pagination. Advances by the rows actually returned and keeps going until the
+   * Shared loop for both pagination styles. Advances by the rows actually returned and keeps going until the
    * reported total is reached, so a server that caps the page size below the requested length is not truncated.
    */
-  async paginate<T>(
+  private async pageThrough<T>(
     path: string,
-    body: Record<string, unknown>,
-    opts: { pageSize: number; pick: (json: unknown) => { rows: T[]; total?: number }; maxRows?: number },
+    pageSize: number,
+    maxRows: number,
+    fetchPage: (offset: number) => Promise<{ rows: T[]; total?: number | null }>,
   ): Promise<T[]> {
     const all: T[] = [];
-    const maxRows = opts.maxRows ?? 50_000;
     let reported: number | null = null;
-    let pages = 0;
+    let prevFirst: string | null = null;
+    this.fetchStats[path] = { fetched: 0, total: null, pages: 0, ms: 0, done: false };
+    await this.onPage?.(true);
     for (let offset = 0; ; ) {
-      const json = await this.post(path, { ...body, offset, length: opts.pageSize });
-      pages++;
-      const { rows, total } = opts.pick(json);
+      const started = Date.now();
+      const { rows, total } = await fetchPage(offset);
       if (total != null && Number.isFinite(Number(total))) reported = Number(total);
+      const first = rows.length ? JSON.stringify(rows[0]) : null;
+      if (offset > 0 && first != null && first === prevFirst) {
+        throw new ErpError(`ERP 接口 ${path} 没有按 offset 翻页（第 ${offset} 条起返回了和上一页相同的数据），已停止同步`);
+      }
+      prevFirst = first;
       all.push(...rows);
       offset += rows.length;
-      if (rows.length === 0) break;
-      if (reported != null ? all.length >= reported : rows.length < opts.pageSize) break;
-      if (all.length >= maxRows) throw new ErpError(`${path} 数据超过 ${maxRows} 条，请缩小同步范围`);
-    }
-    this.record(path, all.length, reported, pages);
-    return all;
-  }
-
-  /** Local REST list endpoints (`items` + `total`). */
-  async listAll<T>(path: string, query: Record<string, string> = {}, maxRows = 50_000): Promise<T[]> {
-    const all: T[] = [];
-    const pageSize = 100;
-    let reported: number | null = null;
-    let pages = 0;
-    for (let offset = 0; ; ) {
-      const qs = new URLSearchParams({ ...query, limit: String(pageSize), offset: String(offset) });
-      const json = (await this.get(`${path}?${qs}`)) as { items?: T[]; total?: number; data?: { items?: T[]; total?: number } };
-      pages++;
-      const page = json.items ? json : (json.data ?? {});
-      const rows = page.items ?? [];
-      if (page.total != null) reported = Number(page.total);
-      all.push(...rows);
-      offset += rows.length;
+      await this.progress(path, all.length, reported, Date.now() - started, false);
       if (rows.length === 0) break;
       if (reported != null ? all.length >= reported : rows.length < pageSize) break;
       if (all.length >= maxRows) throw new ErpError(`${path} 数据超过 ${maxRows} 条，请缩小同步范围`);
     }
-    this.record(path, all.length, reported, pages);
+    await this.progress(path, all.length, reported, 0, true);
     return all;
+  }
+
+  /** Lingxing-style offset/length pagination (POST body). */
+  paginate<T>(
+    path: string,
+    body: Record<string, unknown>,
+    opts: { pageSize: number; pick: (json: unknown) => { rows: T[]; total?: number }; maxRows?: number },
+  ): Promise<T[]> {
+    return this.pageThrough(path, opts.pageSize, opts.maxRows ?? 50_000, async (offset) =>
+      opts.pick(await this.post(path, { ...body, offset, length: opts.pageSize })),
+    );
+  }
+
+  /** Local REST list endpoints (`items` + `total`, limit up to 200). */
+  listAll<T>(path: string, query: Record<string, string> = {}, maxRows = 50_000): Promise<T[]> {
+    const pageSize = 200;
+    return this.pageThrough(path, pageSize, maxRows, async (offset) => {
+      const qs = new URLSearchParams({ ...query, limit: String(pageSize), offset: String(offset) });
+      const json = (await this.get(`${path}?${qs}`)) as { items?: T[]; total?: number; data?: { items?: T[]; total?: number } };
+      const page = json.items ? json : (json.data ?? {});
+      return { rows: page.items ?? [], total: page.total };
+    });
   }
 }

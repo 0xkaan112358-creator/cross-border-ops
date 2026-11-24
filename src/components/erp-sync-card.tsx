@@ -2,10 +2,11 @@
 
 import { CircleCheck, CircleX, PlugZap, RefreshCw, TriangleAlert } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { MARKETPLACE_LABEL } from "@/lib/constants";
 import { formatDateTime } from "@/lib/dates";
+import type { FetchStat } from "@/lib/erp/client";
 import type { SyncRun } from "@/lib/erp/sync";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -19,6 +20,7 @@ export type ErpOverview = {
   dataSource: "erp" | "local";
 };
 
+/** In request order; jsonb does not keep key order, so the tables sort by this list. */
 const SOURCE_LABEL: Record<string, string> = {
   "api/v1/products": "产品列表",
   "api/v1/warehouses": "仓库列表",
@@ -30,12 +32,52 @@ const SOURCE_LABEL: Record<string, string> = {
   "api/v1/fba-delivery-orders": "FBA 发货单（货件商品明细）",
   "erp/sc/data/mws/orders": "亚马逊订单（近 60 天）",
 };
+const SOURCE_ORDER = Object.keys(SOURCE_LABEL);
+const sourceRank = (path: string) => (SOURCE_ORDER.includes(path) ? SOURCE_ORDER.indexOf(path) : SOURCE_ORDER.length);
 
 function Stat({ label, value }: { label: string; value: number | undefined }) {
   return (
     <div className="rounded-lg bg-muted/50 px-3 py-2">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="text-base font-semibold tabular-nums">{(value ?? 0).toLocaleString()}</div>
+    </div>
+  );
+}
+
+const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} 秒`;
+
+function FetchTable({ stats, live }: { stats: Record<string, FetchStat>; live?: boolean }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[26rem] text-left text-xs">
+        <thead className="text-muted-foreground">
+          <tr>
+            <th className="py-1 pr-2 font-normal">接口</th>
+            <th className="py-1 pr-2 text-right font-normal">拉取条数</th>
+            <th className="py-1 pr-2 text-right font-normal">ERP 报告总数</th>
+            <th className="py-1 pr-2 text-right font-normal">页数</th>
+            <th className="py-1 text-right font-normal">耗时</th>
+          </tr>
+        </thead>
+        <tbody>
+          {Object.entries(stats)
+            .sort(([a], [b]) => sourceRank(a) - sourceRank(b))
+            .map(([path, st]) => (
+              <tr key={path} className="border-t border-border/60">
+                <td className="py-1 pr-2 break-all">
+                  {SOURCE_LABEL[path] ?? path}
+                  {live && st.done === false && <span className="ml-1.5 text-primary">拉取中…</span>}
+                </td>
+                <td className="py-1 pr-2 text-right tabular-nums">{st.fetched.toLocaleString()}</td>
+                <td className={`py-1 pr-2 text-right tabular-nums ${st.done !== false && st.total != null && st.total !== st.fetched ? "text-red-700" : ""}`}>
+                  {st.total == null ? "未提供" : st.total.toLocaleString()}
+                </td>
+                <td className="py-1 pr-2 text-right tabular-nums">{st.pages}</td>
+                <td className="py-1 text-right tabular-nums">{st.ms == null ? "—" : seconds(st.ms)}</td>
+              </tr>
+            ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -47,19 +89,39 @@ function duration(run: SyncRun) {
 
 function LastRun({ run }: { run: SyncRun }) {
   if (run.status === "running") {
+    const p = run.summary;
     return (
-      <div className="flex items-center gap-2 rounded-lg border p-3 text-sm text-muted-foreground">
-        <Spinner /> 同步进行中（{formatDateTime(run.started_at)} 开始，由 {run.triggered_by ?? "管理员"} 发起）
+      <div className="space-y-2 rounded-lg border p-3 text-sm">
+        <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
+          <Spinner /> 同步进行中（{formatDateTime(run.started_at)} 开始，由 {run.triggered_by ?? "管理员"} 发起）
+        </div>
+        {p.step && (
+          <p className="text-xs text-muted-foreground">
+            当前步骤：{p.step} · 已用 {seconds(p.elapsedMs ?? 0)} · 已请求 {p.requests ?? 0} 次
+          </p>
+        )}
+        {p.fetchStats && Object.keys(p.fetchStats).length > 0 && <FetchTable stats={p.fetchStats} live />}
       </div>
     );
   }
   if (run.status === "failed") {
+    const p = run.summary;
     return (
-      <div className="rounded-lg border border-red-200 bg-red-50/60 p-3 text-sm">
+      <div className="space-y-2 rounded-lg border border-red-200 bg-red-50/60 p-3 text-sm">
         <div className="flex items-center gap-1.5 font-medium text-red-700">
           <CircleX className="size-4" /> {formatDateTime(run.started_at)} 同步失败，数据没有变化
         </div>
-        <p className="mt-1 text-red-700/90">{run.error}</p>
+        <p className="text-red-700/90">{run.error}</p>
+        {p?.step && (
+          <p className="text-xs text-red-700/80">
+            停在：{p.step} · 已用 {seconds(p.elapsedMs ?? 0)} · 已请求 {p.requests ?? 0} 次
+          </p>
+        )}
+        {p?.fetchStats && Object.keys(p.fetchStats).length > 0 && (
+          <div className="rounded-md bg-background/80 p-2">
+            <FetchTable stats={p.fetchStats} live />
+          </div>
+        )}
       </div>
     );
   }
@@ -101,28 +163,9 @@ function LastRun({ run }: { run: SyncRun }) {
       {s.fetchStats && (
         <details className="rounded-lg bg-muted/40 p-3 text-xs">
           <summary className="cursor-pointer list-none font-medium">ERP 原始数据（用于核对同步是否完整）</summary>
-          <table className="mt-2 w-full text-left">
-            <thead className="text-muted-foreground">
-              <tr>
-                <th className="py-1 pr-2 font-normal">接口</th>
-                <th className="py-1 pr-2 text-right font-normal">拉取条数</th>
-                <th className="py-1 pr-2 text-right font-normal">ERP 报告总数</th>
-                <th className="py-1 text-right font-normal">页数</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(s.fetchStats).map(([path, st]) => (
-                <tr key={path} className="border-t border-border/60">
-                  <td className="py-1 pr-2 break-all">{SOURCE_LABEL[path] ?? path}</td>
-                  <td className="py-1 pr-2 text-right tabular-nums">{st.fetched.toLocaleString()}</td>
-                  <td className={`py-1 pr-2 text-right tabular-nums ${st.total != null && st.total !== st.fetched ? "text-red-700" : ""}`}>
-                    {st.total == null ? "未提供" : st.total.toLocaleString()}
-                  </td>
-                  <td className="py-1 text-right tabular-nums">{st.pages}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="mt-2">
+            <FetchTable stats={s.fetchStats} />
+          </div>
           {s.breakdown && (
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               {Object.entries(s.breakdown).map(([title, rows]) => (
@@ -186,6 +229,13 @@ export function ErpSyncCard({ overview }: { overview: ErpOverview }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const { config, runs, dataSource } = overview;
   const last = runs[0];
+  const inProgress = syncing || last?.status === "running";
+
+  useEffect(() => {
+    if (!inProgress) return;
+    const timer = setInterval(() => router.refresh(), 3000);
+    return () => clearInterval(timer);
+  }, [inProgress, router]);
 
   const sync = async () => {
     setConfirmOpen(false);
@@ -239,7 +289,7 @@ export function ErpSyncCard({ overview }: { overview: ErpOverview }) {
             ；如果 ERP 使用自签名证书，还需要填写 <code className="text-xs">ERP_TLS_FINGERPRINT</code>。
           </div>
         )}
-        {syncing && <p className="text-xs text-muted-foreground">正在从 ERP 拉取数据，数据量较大时可能需要一两分钟，请不要关闭页面。</p>}
+        {syncing && <p className="text-xs text-muted-foreground">正在从 ERP 拉取数据，下方每 3 秒刷新一次进度。关闭页面不会中断同步。</p>}
         {last && <LastRun run={last} />}
       </CardContent>
 

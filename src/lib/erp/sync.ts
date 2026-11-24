@@ -2,11 +2,15 @@ import "server-only";
 import { sql, tx, type Query } from "../db";
 import { addDays, todayStr } from "../dates";
 import { clearBusinessData } from "../seed";
-import { describeErpConfig, ErpClient, ErpError, readErpConfig } from "./client";
+import { describeErpConfig, ErpClient, ErpError, readErpConfig, type FetchStat } from "./client";
 import { mapSnapshot, type ErpSnapshot, type MappedData, type SyncWarning } from "./mapping";
 
 export const SALES_DAYS = 60;
 const PURCHASE_ORDER_DAYS = 365;
+/** No new ERP request after this; leaves room for one slow request (30 s timeout) and the DB write within the 300 s route limit. */
+const FETCH_BUDGET_MS = 200_000;
+/** A run still "running" after this was cut off by the platform (route limit or restart) and never recorded its end. */
+const STALE_RUN_MINUTES = 6;
 
 export type SyncSummary = {
   firstSync: boolean;
@@ -17,12 +21,20 @@ export type SyncSummary = {
   orders: number;
   deactivated: number;
   source: Record<string, number>;
-  fetchStats: Record<string, { fetched: number; total: number | null; pages: number }>;
+  fetchStats: Record<string, FetchStat>;
   breakdown: Record<string, [string, number][]>;
   fields: Record<string, string[]>;
   stores: MappedData["storeMarketplaces"];
   requests: number;
   durationMs: number;
+};
+
+/** Saved while a run is in progress and kept when it fails. */
+export type SyncProgress = {
+  step: string;
+  elapsedMs: number;
+  requests: number;
+  fetchStats: Record<string, FetchStat>;
 };
 
 export type SyncRun = {
@@ -31,7 +43,7 @@ export type SyncRun = {
   triggered_by: string | null;
   started_at: string;
   finished_at: string | null;
-  summary: Partial<SyncSummary>;
+  summary: Partial<SyncSummary> & Partial<SyncProgress>;
   warnings: SyncWarning[];
   error: string | null;
 };
@@ -220,14 +232,23 @@ async function writeData(q: Query, data: MappedData, today: string) {
   return { firstSync, deactivated: deactivated.length };
 }
 
+async function closeStaleRuns() {
+  await sql(
+    `update erp_sync_runs set status = 'failed', finished_at = now(),
+       error = '同步被中断：超过平台单次执行上限（5 分钟）或服务重启，没有写入任何数据。最后一次记录的进度见下方。'
+     where status = 'running' and started_at < now() - interval '${STALE_RUN_MINUTES} minutes'`,
+  );
+}
+
 export async function runErpSync(triggeredBy: string): Promise<SyncRun> {
   const config = readErpConfig();
   if (!config) throw new ErpError("尚未配置 ERP 连接（ERP_BASE_URL、ERP_USERNAME、ERP_PASSWORD）");
 
+  await closeStaleRuns();
   const claimed = await sql<{ id: number }>(
     `insert into erp_sync_runs (status, triggered_by)
      select 'running', $1
-     where not exists (select 1 from erp_sync_runs where status = 'running' and started_at > now() - interval '15 minutes')
+     where not exists (select 1 from erp_sync_runs where status = 'running')
      returning id`,
     [triggeredBy],
   );
@@ -236,10 +257,23 @@ export async function runErpSync(triggeredBy: string): Promise<SyncRun> {
   const started = Date.now();
   const today = todayStr();
   const client = new ErpClient(config);
+  client.deadline = started + FETCH_BUDGET_MS;
   console.info(`[erp-sync] run=${runId} 开始 by=${triggeredBy} host=${config.baseUrl.host}`);
+
+  let step = "拉取 ERP 数据";
+  const progress = (): SyncProgress => ({ step, elapsedMs: Date.now() - started, requests: client.requestCount, fetchStats: client.fetchStats });
+  let lastSaved = 0;
+  const saveProgress = async (force = false) => {
+    if (!force && Date.now() - lastSaved < 2000) return;
+    lastSaved = Date.now();
+    await sql("update erp_sync_runs set summary = $2::jsonb where id = $1 and status = 'running'", [runId, JSON.stringify(progress())]);
+  };
+  client.onPage = (important) => saveProgress(important);
 
   try {
     const snap = await fetchSnapshot(client, today);
+    step = "整理数据并写入";
+    await saveProgress(true);
     const source = Object.fromEntries(Object.entries(snap).map(([k, v]) => [k, (v as unknown[]).length]));
     const breakdown = describeSnapshot(snap);
     const fields = describeFields(snap);
@@ -276,13 +310,18 @@ export async function runErpSync(triggeredBy: string): Promise<SyncRun> {
     return run;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`[erp-sync] run=${runId} 失败：${message}`);
-    await sql("update erp_sync_runs set status = 'failed', finished_at = now(), error = $2 where id = $1", [runId, message]);
+    console.error(`[erp-sync] run=${runId} 失败（${step}，${Date.now() - started}ms）：${message} stats=${JSON.stringify(client.fetchStats)}`);
+    await sql("update erp_sync_runs set status = 'failed', finished_at = now(), error = $2, summary = $3::jsonb where id = $1", [
+      runId,
+      message,
+      JSON.stringify(progress()),
+    ]);
     throw error instanceof ErpError ? error : new ErpError(`同步失败：${message}`);
   }
 }
 
 export async function getSyncOverview() {
+  await closeStaleRuns();
   const runs = await sql<SyncRun>(
     `select id, status, triggered_by, started_at::text, finished_at::text, summary, warnings, error
      from erp_sync_runs order by started_at desc limit 5`,

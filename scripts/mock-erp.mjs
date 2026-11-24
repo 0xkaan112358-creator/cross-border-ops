@@ -5,6 +5,9 @@ import http from "node:http";
 const PORT = Number(process.env.MOCK_ERP_PORT || 19437);
 // Optional cap on rows per page, to mimic servers that return fewer rows than the requested length.
 const PAGE_CAP = Number(process.env.MOCK_ERP_PAGE_CAP || 0);
+// Optional per-request delay, and a switch that makes list endpoints ignore offset, to exercise slow or broken servers.
+const DELAY_MS = Number(process.env.MOCK_ERP_DELAY_MS || 0);
+const IGNORE_OFFSET = process.env.MOCK_ERP_IGNORE_OFFSET === "1";
 const USER = "mock-admin";
 const PASS = "mock-pass";
 const tokens = new Map();
@@ -125,7 +128,7 @@ function send(res, status, body) {
 }
 
 function page(rows, body, defLen) {
-  const offset = Number(body.offset ?? 0);
+  const offset = IGNORE_OFFSET ? 0 : Number(body.offset ?? 0);
   const length = PAGE_CAP ? Math.min(PAGE_CAP, Number(body.length ?? defLen)) : Number(body.length ?? defLen);
   return rows.slice(offset, offset + length);
 }
@@ -150,7 +153,8 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   let raw = "";
   req.on("data", (c) => (raw += c));
-  req.on("end", () => {
+  req.on("end", async () => {
+    if (DELAY_MS) await new Promise((r) => setTimeout(r, DELAY_MS));
     const body = raw ? JSON.parse(raw) : {};
     console.log(`[mock-erp] ${req.method} ${url.pathname} ${raw.slice(0, 160)}`);
     if (url.pathname === "/healthz") return send(res, 200, { status: "ok", service: "模拟ERP(本地)" });
