@@ -134,6 +134,31 @@ function formatDate(date: string, l: Lang) {
 const STATUS_TEXT: Record<string, Record<Lang, string> & { zh: string }> = {
   运输中: { en: "in transit", de: "unterwegs", fr: "en cours d'acheminement", it: "in transito", es: "en tránsito", zh: "运输中" },
   派送中: { en: "out for delivery", de: "in Zustellung", fr: "en cours de livraison", it: "in consegna", es: "en reparto", zh: "正在派送" },
+  已发货: { en: "on its way", de: "unterwegs", fr: "en route", it: "in viaggio", es: "en camino", zh: "已发货，正在运输途中" },
+};
+
+const CARRIER_TEXT: Record<Lang, (carrier: string) => string> = {
+  en: (c) => ` with ${c}`,
+  de: (c) => ` mit ${c}`,
+  fr: (c) => ` avec ${c}`,
+  it: (c) => ` con ${c}`,
+  es: (c) => ` con ${c}`,
+};
+
+const TRACKING_TEXT: Record<Lang, (no: string) => string> = {
+  en: (n) => ` (tracking number: ${n})`,
+  de: (n) => ` (Sendungsnummer: ${n})`,
+  fr: (n) => ` (numéro de suivi : ${n})`,
+  it: (n) => ` (numero di tracciamento: ${n})`,
+  es: (n) => ` (número de seguimiento: ${n})`,
+};
+
+const ETA_TEXT: Record<Lang, (eta: string) => string> = {
+  en: (d) => ` The estimated delivery date is ${d}.`,
+  de: (d) => ` Voraussichtliches Lieferdatum: ${d}.`,
+  fr: (d) => ` Date de livraison estimée : ${d}.`,
+  it: (d) => ` Data di consegna prevista: ${d}.`,
+  es: (d) => ` Fecha de entrega estimada: ${d}.`,
 };
 
 const SIGN: Record<Lang, string> = {
@@ -179,17 +204,20 @@ export function mockLogisticsReply(language: string, name: string, order: OrderI
     };
   }
   const st = STATUS_TEXT[order.shipping_status ?? ""] ?? STATUS_TEXT["运输中"];
-  const eta = order.est_delivery ? formatDate(order.est_delivery, l) : "—";
+  const eta = order.est_delivery ? formatDate(order.est_delivery, l) : null;
+  const detail = (x: Lang) =>
+    `${order.carrier ? CARRIER_TEXT[x](order.carrier) : ""}${order.tracking_no ? TRACKING_TEXT[x](order.tracking_no) : ""}.${eta ? ETA_TEXT[x](eta) : ""}`;
   const body: Record<Lang, string> = {
-    en: `Thank you for reaching out. Your order ${order.order_id} is currently ${st.en} with ${order.carrier} (tracking number: ${order.tracking_no}). The estimated delivery date is ${eta}.\n\nYou can follow the latest status in Your Orders at any time. If the package has not arrived by then, please let us know and we will be happy to help.`,
-    de: `vielen Dank für Ihre Nachricht. Ihre Bestellung ${order.order_id} ist derzeit ${st.de} mit ${order.carrier} (Sendungsnummer: ${order.tracking_no}). Voraussichtliches Lieferdatum: ${eta}.\n\nDen aktuellen Status können Sie jederzeit unter „Meine Bestellungen" verfolgen. Sollte das Paket bis dahin nicht angekommen sein, melden Sie sich bitte gerne bei uns.`,
-    fr: `merci pour votre message. Votre commande ${order.order_id} est actuellement ${st.fr} avec ${order.carrier} (numéro de suivi : ${order.tracking_no}). Date de livraison estimée : ${eta}.\n\nVous pouvez suivre son statut à tout moment dans « Vos commandes ». Si le colis n'est pas arrivé d'ici là, n'hésitez pas à nous contacter.`,
-    it: `grazie per averci contattato. Il suo ordine ${order.order_id} è attualmente ${st.it} con ${order.carrier} (numero di tracciamento: ${order.tracking_no}). Data di consegna prevista: ${eta}.\n\nPuò seguire lo stato aggiornato in qualsiasi momento in «I miei ordini». Se il pacco non dovesse arrivare entro tale data, non esiti a contattarci.`,
-    es: `gracias por escribirnos. Su pedido ${order.order_id} está actualmente ${st.es} con ${order.carrier} (número de seguimiento: ${order.tracking_no}). Fecha de entrega estimada: ${eta}.\n\nPuede consultar el estado actualizado en cualquier momento en «Mis pedidos». Si el paquete no ha llegado para esa fecha, no dude en contactarnos.`,
+    en: `Thank you for reaching out. Your order ${order.order_id} is currently ${st.en}${detail("en")}\n\nYou can follow the latest status in Your Orders at any time. If the package has not arrived by then, please let us know and we will be happy to help.`,
+    de: `vielen Dank für Ihre Nachricht. Ihre Bestellung ${order.order_id} ist derzeit ${st.de}${detail("de")}\n\nDen aktuellen Status können Sie jederzeit unter „Meine Bestellungen" verfolgen. Sollte das Paket bis dahin nicht angekommen sein, melden Sie sich bitte gerne bei uns.`,
+    fr: `merci pour votre message. Votre commande ${order.order_id} est actuellement ${st.fr}${detail("fr")}\n\nVous pouvez suivre son statut à tout moment dans « Vos commandes ». Si le colis n'est pas arrivé d'ici là, n'hésitez pas à nous contacter.`,
+    it: `grazie per averci contattato. Il suo ordine ${order.order_id} è attualmente ${st.it}${detail("it")}\n\nPuò seguire lo stato aggiornato in qualsiasi momento in «I miei ordini». Se il pacco non dovesse arrivare entro tale data, non esiti a contattarci.`,
+    es: `gracias por escribirnos. Su pedido ${order.order_id} está actualmente ${st.es}${detail("es")}\n\nPuede consultar el estado actualizado en cualquier momento en «Mis pedidos». Si el paquete no ha llegado para esa fecha, no dude en contactarnos.`,
   };
+  const zhParts = [order.carrier && `承运商 ${order.carrier}`, order.tracking_no && `追踪号 ${order.tracking_no}`, order.est_delivery && `预计 ${order.est_delivery} 送达`].filter(Boolean);
   return {
     reply: `${GREET[l](firstName)}\n\n${body[l]}\n\n${SIGN[l]}`,
-    reply_zh: `${firstName} 您好：感谢联系。您的订单 ${order.order_id} 目前${st.zh}，承运商 ${order.carrier}，追踪号 ${order.tracking_no}，预计 ${order.est_delivery ?? "—"} 送达。您可以随时在"我的订单"中查看最新状态，如到时仍未收到请联系我们。`,
+    reply_zh: `${firstName} 您好：感谢联系。您的订单 ${order.order_id} 目前${st.zh}${zhParts.length ? `，${zhParts.join("，")}` : ""}。您可以随时在"我的订单"中查看最新状态，如到时仍未收到请联系我们。`,
   };
 }
 
