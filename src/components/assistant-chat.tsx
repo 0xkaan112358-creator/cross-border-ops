@@ -41,7 +41,10 @@ export function AssistantChat({ initialQuestion }: { initialQuestion: string }) 
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "回答失败");
-      setMessages([...history, { role: "assistant", ...data }]);
+      setMessages([
+        ...history,
+        { role: "assistant", content: data.answer, citations: data.citations, toolsUsed: data.toolsUsed, mode: data.mode },
+      ]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "回答失败，请稍后重试");
     } finally {
