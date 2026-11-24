@@ -55,17 +55,14 @@ async function fetchSnapshot(client: ErpClient, today: string): Promise<ErpSnaps
     { search_field_time: "create_time", start_date: addDays(today, -PURCHASE_ORDER_DAYS), end_date: today },
     { pageSize: 500, pick: rowsOf },
   );
-  const shipments = await client.paginate<Row>(
-    "erp/sc/routing/storage/shipment/getInboundShipmentList",
-    { is_delete: 0 },
-    { pageSize: 100, pick: rowsOf },
-  );
+  const shipments = await client.listAll<Row>("api/v1/shipments");
+  const deliveryOrders = await client.listAll<Row>("api/v1/fba-delivery-orders");
   const orders = await client.paginate<Row>(
     "erp/sc/data/mws/orders",
     { date_type: 1, start_date: addDays(today, -SALES_DAYS), end_date: addDays(today, 1) },
     { pageSize: 1000, pick: rowsOf },
   );
-  return { products, warehouses, fbaStock, localStock, purchaseOrders, shipments, orders };
+  return { products, warehouses, fbaStock, localStock, purchaseOrders, shipments, deliveryOrders, orders };
 }
 
 function countBy(rows: Row[], key: (r: Row) => string, limit = 12): [string, number][] {
@@ -75,17 +72,19 @@ function countBy(rows: Row[], key: (r: Row) => string, limit = 12): [string, num
 }
 
 function describeSnapshot(snap: ErpSnapshot): Record<string, [string, number][]> {
+  const text = (v: unknown) => String(v ?? "").trim() || "（空）";
   const label = (sid: unknown, name: unknown) => `${String(name ?? "").trim() || "（无名称）"}｜sid ${String(sid ?? "")}`;
-  const lines = snap.shipments.flatMap((s) => (s.relate_list as Row[] | undefined) ?? []);
   return {
     订单按销售渠道: countBy(snap.orders, (o) => String(o.sales_channel ?? "").trim() || "（空）"),
     订单按店铺: countBy(snap.orders, (o) => label(o.sid, o.seller_name)),
     订单按状态: countBy(snap.orders, (o) => String(o.order_status ?? "").trim() || "（空）"),
     FBA库存按店铺: countBy(snap.fbaStock, (f) => `${label(f.sid, f.seller_group_name || f.name)}｜共享类型 ${String(f.share_type ?? "")}`),
-    发货单明细按国家: countBy(lines, (r) => `${String(r.nation ?? "").trim() || "（空）"}｜${label(r.sid, r.sname)}`),
     仓库类型: countBy(snap.warehouses, (w) => `${String(w.warehouse_type ?? "").trim() || "（空）"}｜${String(w.country ?? "").trim() || "（无国家）"}`),
     采购单按状态: countBy(snap.purchaseOrders, (po) => `${String(po.status ?? "（空）")} ${String(po.status_text ?? "").trim()}`.trim()),
-    发货单按状态: countBy(snap.shipments, (s) => `${String(s.status ?? "（空）")} ${String(s.status_name ?? "").trim()}`.trim()),
+    货件按状态: countBy(snap.shipments, (s) => `${text(s.status_text)}｜亚马逊状态 ${text(s.amazon_status)}`),
+    货件按国家: countBy(snap.shipments, (s) => `${text(s.country)}｜站点 ${text(s.site)}｜目的地 ${text(s.destination)}`),
+    FBA发货单按状态: countBy(snap.deliveryOrders, (d) => `${text(d.status_text)}｜${String(d.shipped_at ?? "").trim() ? "有发货时间" : "无发货时间"}`),
+    FBA发货单按店铺: countBy(snap.deliveryOrders, (d) => text(d.store_name)),
     仓库库存明细按仓库: countBy(snap.localStock, (r) => {
       const wid = String(r.wid ?? "").trim();
       const wh = snap.warehouses.find((w) => String(w.id) === wid);
@@ -108,8 +107,9 @@ function describeFields(snap: ErpSnapshot): Record<string, string[]> {
     仓库库存明细: firstKeys(snap.localStock),
     采购单: firstKeys(snap.purchaseOrders),
     "采购单.item_list": firstKeys(snap.purchaseOrders[0]?.item_list as Row[] | undefined),
-    发货单: firstKeys(snap.shipments),
-    "发货单.relate_list": firstKeys(snap.shipments[0]?.relate_list as Row[] | undefined),
+    货件: firstKeys(snap.shipments),
+    FBA发货单: firstKeys(snap.deliveryOrders),
+    "FBA发货单.item_list": firstKeys(snap.deliveryOrders.find((d) => Array.isArray(d.item_list) && d.item_list.length)?.item_list as Row[] | undefined),
     订单: firstKeys(snap.orders),
     "订单.item_list": firstKeys(snap.orders[0]?.item_list as Row[] | undefined),
   };

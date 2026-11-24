@@ -9,7 +9,10 @@ export type ErpSnapshot = {
   fbaStock: Row[];
   localStock: Row[];
   purchaseOrders: Row[];
+  /** Shipment headers from REST /api/v1/shipments (no SKU lines). */
   shipments: Row[];
+  /** FBA delivery orders from REST /api/v1/fba-delivery-orders; carry shipment_id and the SKU lines. */
+  deliveryOrders: Row[];
   orders: Row[];
 };
 
@@ -154,6 +157,17 @@ function splitByWeight(total: number, weights: number[]): number[] {
   return out;
 }
 
+const SHIPMENT_VOID = /取消|作废|删除|草稿|cancel|void|deleted|draft/i;
+const SHIPMENT_NOT_SHIPPED = /待发|未发|待出库|待审|计划|working|plan/i;
+const SHIPMENT_DONE = /已完成|已关闭|完结|closed|completed/i;
+const SHIPMENT_ARRIVED = /签收|到仓|收货|接收|入库|receiv|checked.?in|delivered/i;
+
+/** First field present (non-empty) among the candidates, as a number; 0 when none. */
+function firstNum(row: Row, keys: string[]) {
+  for (const k of keys) if (row[k] != null && str(row[k]) !== "") return num(row[k]);
+  return 0;
+}
+
 function shipMethod(text: string) {
   if (/空运|air/i.test(text)) return "air";
   if (/铁路|卡航|rail|train/i.test(text)) return "rail";
@@ -176,9 +190,6 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     stores.set(id, entry);
   };
   for (const o of snap.orders) hint(o.sid, o.seller_name, o.sales_channel, "订单销售渠道");
-  for (const s of snap.shipments) {
-    for (const r of (s.relate_list as Row[] | undefined) ?? []) hint(r.sid, r.sname, r.nation, "发货单国家");
-  }
   for (const f of snap.fbaStock) hint(f.sid, f.seller_group_name || f.name, "", "FBA库存");
   for (const [, e] of stores) {
     if (e.votes.size === 0) {
@@ -346,40 +357,69 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     v.aged_qty += aged;
   }
 
-  // In-transit FBA shipments.
+  // In-transit FBA shipments: headers (country, ETA, carrier) joined by shipment_id with delivery orders (SKU lines).
+  // Quantity still on the way = shipped - received, per line.
+  const storeByName = new Map<string, Marketplace | null>();
+  for (const st of storeMarketplaces) if (st.name) storeByName.set(st.name, st.marketplace);
+  const headerById = new Map<string, Row>();
+  for (const h of snap.shipments) if (str(h.shipment_id)) headerById.set(str(h.shipment_id), h);
+  const coveredHeaders = new Set<string>();
   const shipAgg = new Map<string, SyncedShipment>();
-  for (const s of snap.shipments) {
-    if (num(s.status) !== 1 || num(s.is_delete) === 1) continue;
-    const method = shipMethod(`${str(s.method_name)} ${str(s.logistics_channel_name)}`);
-    const shipDate = dateOf(s.shipment_time) ?? dateOf(s.shipment_time_second);
-    const eta = dateOf(s.expected_arrival_date) ?? dateOf(s.eta_date);
-    const delivered = dateOf(s.delivery_date) != null;
-    for (const r of (s.relate_list as Row[] | undefined) ?? []) {
-      const sku = localSku(r, "msku");
-      const mp = guessMarketplace(r.nation) ?? mpOfStore(r.sid);
-      const qty = num(r.num) || num(r.quantity_shipped);
+  for (const d of snap.deliveryOrders) {
+    const shipmentId = str(d.shipment_id);
+    const h = headerById.get(shipmentId);
+    if (h) coveredHeaders.add(shipmentId);
+    const statusText = `${str(d.status_text)} ${str(h?.status_text)} ${str(h?.amazon_status)}`;
+    const label = shipmentId || str(d.delivery_order_no) || `发货单 ${str(d.id)}`;
+    if (SHIPMENT_VOID.test(statusText)) continue;
+    if (!str(d.shipped_at) && SHIPMENT_NOT_SHIPPED.test(statusText)) continue;
+    const mp =
+      guessMarketplace(h?.country) ??
+      guessMarketplace(h?.site) ??
+      guessMarketplace(h?.destination) ??
+      (storeByName.get(str(d.store_name)) || null) ??
+      guessMarketplace(d.store_name) ??
+      guessMarketplace(d.destination);
+    const items = (d.item_list as Row[] | undefined) ?? [];
+    if (!items.length) {
+      warnings.add("delivery_no_items", "FBA 发货单没有商品明细，未计入在途货件", label);
+      continue;
+    }
+    if (!mp) {
+      warnings.add("shipment_no_marketplace", "货件无法识别站点（货件的国家/站点/目的地和发货单店铺都没有国家信息），已跳过", label);
+      continue;
+    }
+    const orderReceived = num(d.received_qty) > 0 || SHIPMENT_ARRIVED.test(statusText);
+    const method = shipMethod(`${str(h?.shipment_type)} ${str(h?.logistics_channel)} ${str(h?.carrier)} ${str(d.carrier)}`);
+    const shipDate = dateOf(d.shipped_at) ?? dateOf(h?.expected_ship_date);
+    const eta = dateOf(h?.expected_arrival_date);
+    for (const it of items) {
+      const sku = localSku(it, "msku", "seller_sku");
+      const shipped = firstNum(it, ["shipped_qty", "quantity_shipped", "ship_qty", "quantity", "qty", "num"]);
+      const received = firstNum(it, ["received_qty", "quantity_received", "receive_qty", "receive_num"]);
+      const qty = shipped - received;
       if (!sku || qty <= 0) continue;
-      if (!mp) {
-        warnings.add("shipment_no_marketplace", "发货单明细无法识别站点，已跳过", `${str(s.shipment_sn)} ${sku}`);
-        continue;
-      }
-      touch(sku, mp, r.asin, r.product_name);
-      const shipmentNo = str(r.shipment_id) || str(s.shipment_sn);
-      const k = `${shipmentNo}|${sku}|${mp}`;
+      touch(sku, mp, it.asin, it.product_name ?? it.name);
+      const k = `${label}|${sku}|${mp}`;
       const cur = shipAgg.get(k);
       if (cur) cur.qty += qty;
       else
         shipAgg.set(k, {
-          shipment_no: shipmentNo,
+          shipment_no: label,
           sku,
           marketplace: mp,
           qty,
           method,
-          status: delivered ? "已到仓·入库中" : "运输中",
+          status: orderReceived || received > 0 ? "已到仓·入库中" : "运输中",
           ship_date: shipDate,
           eta,
         });
     }
+  }
+  for (const [id, h] of headerById) {
+    const statusText = `${str(h.status_text)} ${str(h.amazon_status)}`;
+    if (coveredHeaders.has(id) || SHIPMENT_VOID.test(statusText) || SHIPMENT_DONE.test(statusText)) continue;
+    warnings.add("shipment_no_delivery", "货件没有对应的 FBA 发货单，拿不到 SKU 明细，未计入在途货件", `${id}（${str(h.status_text) || "无状态"}）`);
   }
 
   // Marketplace a SKU's non-store-specific stock (domestic warehouse, purchase orders) is attributed to:

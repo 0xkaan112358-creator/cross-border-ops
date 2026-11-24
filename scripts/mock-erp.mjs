@@ -58,19 +58,23 @@ const purchaseOrders = [
   { order_sn: "PO-MOCK-003", status: -1, status_text: "作废", item_list: [{ sku: "YOGA-6MM", sid: 101, quantity_receive: 500, is_delete: 0 }] },
 ];
 
+// REST shipment headers (no SKU lines) and FBA delivery orders (SKU lines), joined by shipment_id.
 const shipments = [
-  {
-    id: 1, shipment_sn: "SP-MOCK-001", status: 1, is_delete: 0, shipment_time: daysAgo(12), expected_arrival_date: daysAgo(-20), method_name: "海运", logistics_channel_name: "美森快船", delivery_date: "",
-    relate_list: [
-      { shipment_id: "FBA18MOCKUS1", sid: 101, sname: "Acme-US", nation: "美国", sku: "BOT-750", msku: "BOT-750-US", num: 600, asin: "B0MOCK0001", product_name: "保温杯" },
-      { shipment_id: "FBA18MOCKUS1", sid: 101, sname: "Acme-US", nation: "美国", sku: "YOGA-6MM", msku: "YOGA-6MM-US", num: 0, quantity_shipped: 200, asin: "B0MOCK0002", product_name: "瑜伽垫" },
-    ],
-  },
-  {
-    id: 2, shipment_sn: "SP-MOCK-002", status: 1, is_delete: 0, shipment_time: daysAgo(5), expected_arrival_date: "", eta_date: daysAgo(-3), method_name: "空运", logistics_channel_name: "DHL 空派", delivery_date: daysAgo(1),
-    relate_list: [{ shipment_id: "FBA18MOCKDE1", sid: 103, sname: "Acme-DE", nation: "德国", sku: "LAMP-01", msku: "LAMP-01-EU", num: 200, asin: "B0MOCK0003", product_name: "台灯" }],
-  },
-  { id: 3, shipment_sn: "SP-MOCK-003", status: 2, is_delete: 0, shipment_time: daysAgo(40), relate_list: [{ shipment_id: "FBA18DONE", sid: 101, nation: "美国", sku: "BOT-750", num: 999 }] },
+  { id: 1, shipment_id: "FBA18MOCKUS1", shipment_type: "海运", country: "美国", site: "Amazon.com", destination: "ONT8", carrier: "美森", logistics_channel: "美森快船", status_text: "运输中", amazon_status: "SHIPPED", expected_ship_date: daysAgo(12), expected_arrival_date: daysAgo(-20), received_qty: 0 },
+  { id: 2, shipment_id: "FBA18MOCKDE1", shipment_type: "空运", country: "德国", site: "Amazon.de", destination: "DTM2", carrier: "DHL", logistics_channel: "DHL 空派", status_text: "已签收", amazon_status: "RECEIVING", expected_ship_date: daysAgo(5), expected_arrival_date: daysAgo(-3), received_qty: 50 },
+  { id: 3, shipment_id: "FBA18DONE", shipment_type: "海运", country: "美国", site: "Amazon.com", status_text: "已完成", amazon_status: "CLOSED", expected_arrival_date: daysAgo(10), received_qty: 999 },
+  { id: 4, shipment_id: "FBA18CANCEL", shipment_type: "海运", country: "英国", status_text: "已取消", amazon_status: "CANCELLED", received_qty: 0 },
+  { id: 5, shipment_id: "FBA18NOLINES", shipment_type: "海运", country: "美国", status_text: "运输中", expected_arrival_date: daysAgo(-15), received_qty: 0 },
+];
+const deliveryOrders = [
+  { id: 1, delivery_order_no: "FD-MOCK-001", shipment_id: "FBA18MOCKUS1", store_name: "Acme-US", status_text: "已发货", shipped_qty: 800, received_qty: 0, shipped_at: daysAgo(12),
+    item_list: [{ sku: "BOT-750", msku: "BOT-750-US", asin: "B0MOCK0001", product_name: "保温杯", shipped_qty: 600, received_qty: 0 }, { sku: "YOGA-6MM", msku: "YOGA-6MM-US", shipped_qty: 200, received_qty: 0 }] },
+  { id: 2, delivery_order_no: "FD-MOCK-002", shipment_id: "FBA18MOCKDE1", store_name: "Acme-DE", status_text: "已发货", shipped_qty: 200, received_qty: 50, shipped_at: daysAgo(5),
+    item_list: [{ sku: "LAMP-01", msku: "LAMP-01-EU", shipped_qty: 200, received_qty: 50 }] },
+  { id: 3, delivery_order_no: "FD-MOCK-003", shipment_id: "FBA18DONE", store_name: "Acme-US", status_text: "已完成", shipped_qty: 999, received_qty: 999, shipped_at: daysAgo(40),
+    item_list: [{ sku: "BOT-750", shipped_qty: 999, received_qty: 999 }] },
+  { id: 4, delivery_order_no: "FD-MOCK-004", shipment_id: "FBA18CANCEL", store_name: "Acme-UK", status_text: "已取消", shipped_qty: 0, item_list: [{ sku: "BOT-750", shipped_qty: 300, received_qty: 0 }] },
+  { id: 5, delivery_order_no: "FD-MOCK-005", shipment_id: "FBA18PLAN", store_name: "Acme-US", status_text: "待发货", shipped_qty: 0, shipped_at: "", item_list: [{ sku: "YOGA-6MM", shipped_qty: 100, received_qty: 0 }] },
 ];
 
 function buildOrders() {
@@ -133,17 +137,14 @@ const lingxing = {
       : { code: 0, message: "success", total: fbaStock.length, data: page(fbaStock, b, 20) },
   "/erp/sc/routing/data/local_inventory/inventoryDetails": (b) => ({ code: 0, message: "success", total: localStock.length, data: page(localStock, b, 20) }),
   "/erp/sc/routing/data/local_inventory/purchaseOrderList": (b) => ({ code: 0, message: "success", total: purchaseOrders.length, data: page(purchaseOrders, b, 500) }),
-  "/erp/sc/routing/storage/shipment/getInboundShipmentList": (b) => {
-    const rows = shipments.filter((s) => b.status == null || s.status === Number(b.status));
-    return { code: 0, message: "success", data: { list: page(rows, b, 20), total: rows.length } };
-  },
+  "/erp/sc/routing/storage/shipment/getInboundShipmentList": (b) => ({ code: 0, message: "success", data: { list: page([], b, 20), total: 0 } }),
   "/erp/sc/data/mws/orders": (b) => {
     const rows = orders.filter((o) => (!b.start_date || o.purchase_date_local >= b.start_date) && (!b.end_date || o.purchase_date_local < b.end_date));
     return { code: 0, message: "success", total: rows.length, data: page(rows, b, 1000) };
   },
 };
 
-const rest = { "/api/v1/products": products, "/api/v1/warehouses": warehouses };
+const rest = { "/api/v1/products": products, "/api/v1/warehouses": warehouses, "/api/v1/shipments": shipments, "/api/v1/fba-delivery-orders": deliveryOrders };
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);

@@ -26,6 +26,8 @@ const SOURCE_LABEL: Record<string, string> = {
   "erp/sc/routing/data/local_inventory/inventoryDetails": "仓库库存明细",
   "erp/sc/routing/data/local_inventory/purchaseOrderList": "采购单（近 365 天）",
   "erp/sc/routing/storage/shipment/getInboundShipmentList": "发货单（全部状态）",
+  "api/v1/shipments": "货件",
+  "api/v1/fba-delivery-orders": "FBA 发货单（货件商品明细）",
   "erp/sc/data/mws/orders": "亚马逊订单（近 60 天）",
 };
 
