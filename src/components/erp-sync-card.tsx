@@ -25,7 +25,7 @@ const SOURCE_LABEL: Record<string, string> = {
   "basicOpen/openapi/storage/fbaWarehouseDetail": "FBA 库存",
   "erp/sc/routing/data/local_inventory/inventoryDetails": "仓库库存明细",
   "erp/sc/routing/data/local_inventory/purchaseOrderList": "采购单（近 365 天）",
-  "erp/sc/routing/storage/shipment/getInboundShipmentList": "已发货的发货单",
+  "erp/sc/routing/storage/shipment/getInboundShipmentList": "发货单（全部状态）",
   "erp/sc/data/mws/orders": "亚马逊订单（近 60 天）",
 };
 
@@ -140,6 +140,17 @@ function LastRun({ run }: { run: SyncRun }) {
                       ))}
                     </ul>
                   )}
+                </div>
+              ))}
+            </div>
+          )}
+          {s.fields && (
+            <div className="mt-3 space-y-1">
+              <div className="font-medium">各接口返回的字段（第一条记录）</div>
+              {Object.entries(s.fields).map(([name, keys]) => (
+                <div key={name} className="break-all">
+                  <span className="text-muted-foreground">{name}：</span>
+                  {keys.length ? keys.join(", ") : "无数据"}
                 </div>
               ))}
             </div>

@@ -19,6 +19,7 @@ export type SyncSummary = {
   source: Record<string, number>;
   fetchStats: Record<string, { fetched: number; total: number | null; pages: number }>;
   breakdown: Record<string, [string, number][]>;
+  fields: Record<string, string[]>;
   stores: MappedData["storeMarketplaces"];
   requests: number;
   durationMs: number;
@@ -56,7 +57,7 @@ async function fetchSnapshot(client: ErpClient, today: string): Promise<ErpSnaps
   );
   const shipments = await client.paginate<Row>(
     "erp/sc/routing/storage/shipment/getInboundShipmentList",
-    { status: 1, is_delete: 0 },
+    { is_delete: 0 },
     { pageSize: 100, pick: rowsOf },
   );
   const orders = await client.paginate<Row>(
@@ -83,6 +84,33 @@ function describeSnapshot(snap: ErpSnapshot): Record<string, [string, number][]>
     FBA库存按店铺: countBy(snap.fbaStock, (f) => `${label(f.sid, f.seller_group_name || f.name)}｜共享类型 ${String(f.share_type ?? "")}`),
     发货单明细按国家: countBy(lines, (r) => `${String(r.nation ?? "").trim() || "（空）"}｜${label(r.sid, r.sname)}`),
     仓库类型: countBy(snap.warehouses, (w) => `${String(w.warehouse_type ?? "").trim() || "（空）"}｜${String(w.country ?? "").trim() || "（无国家）"}`),
+    发货单按状态: countBy(snap.shipments, (s) => `${String(s.status ?? "（空）")} ${String(s.status_name ?? "").trim()}`.trim()),
+    仓库库存明细按仓库: countBy(snap.localStock, (r) => {
+      const wid = String(r.wid ?? "").trim();
+      const wh = snap.warehouses.find((w) => String(w.id) === wid);
+      return wid ? `wid ${wid}｜${wh ? `${String(wh.name ?? "")}（${String(wh.warehouse_type ?? "")}）` : "仓库列表中没有"}` : "（没有 wid 字段）";
+    }),
+  };
+}
+
+function firstKeys(rows: Row[] | undefined) {
+  const r = rows?.[0];
+  return r && typeof r === "object" ? Object.keys(r) : [];
+}
+
+/** Field names (not values) of the first row of each source, to compare against the OpenAPI contract. */
+function describeFields(snap: ErpSnapshot): Record<string, string[]> {
+  return {
+    产品列表: firstKeys(snap.products),
+    仓库列表: firstKeys(snap.warehouses),
+    FBA库存: firstKeys(snap.fbaStock),
+    仓库库存明细: firstKeys(snap.localStock),
+    采购单: firstKeys(snap.purchaseOrders),
+    "采购单.item_list": firstKeys(snap.purchaseOrders[0]?.item_list as Row[] | undefined),
+    发货单: firstKeys(snap.shipments),
+    "发货单.relate_list": firstKeys(snap.shipments[0]?.relate_list as Row[] | undefined),
+    订单: firstKeys(snap.orders),
+    "订单.item_list": firstKeys(snap.orders[0]?.item_list as Row[] | undefined),
   };
 }
 
@@ -213,6 +241,8 @@ export async function runErpSync(triggeredBy: string): Promise<SyncRun> {
     const snap = await fetchSnapshot(client, today);
     const source = Object.fromEntries(Object.entries(snap).map(([k, v]) => [k, (v as unknown[]).length]));
     const breakdown = describeSnapshot(snap);
+    const fields = describeFields(snap);
+    console.info(`[erp-sync] run=${runId} 字段 ${JSON.stringify(fields)}`);
     console.info(`[erp-sync] run=${runId} 拉取完成 ${JSON.stringify(source)} stats=${JSON.stringify(client.fetchStats)}`);
     console.info(`[erp-sync] run=${runId} 原始数据分布 ${JSON.stringify(breakdown)}`);
     const data = mapSnapshot(snap, today, SALES_DAYS);
@@ -231,6 +261,7 @@ export async function runErpSync(triggeredBy: string): Promise<SyncRun> {
       source,
       fetchStats: client.fetchStats,
       breakdown,
+      fields,
       stores: data.storeMarketplaces,
       requests: client.requestCount,
       durationMs: Date.now() - started,
