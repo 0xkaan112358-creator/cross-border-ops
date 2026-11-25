@@ -281,6 +281,7 @@ export async function runErpSync(triggeredBy: string): Promise<SyncRun> {
     console.info(`[erp-sync] run=${runId} 拉取完成 ${JSON.stringify(source)} stats=${JSON.stringify(client.fetchStats)}`);
     console.info(`[erp-sync] run=${runId} 原始数据分布 ${JSON.stringify(breakdown)}`);
     const data = mapSnapshot(snap, today, SALES_DAYS);
+    Object.assign(breakdown, data.diagnostics);
     console.info(
       `[erp-sync] run=${runId} 映射完成 skus=${data.skus.length} sales=${data.sales.length} shipments=${data.shipments.length} orders=${data.orders.length} warnings=${data.warnings.map((w) => w.code).join(",")}`,
     );

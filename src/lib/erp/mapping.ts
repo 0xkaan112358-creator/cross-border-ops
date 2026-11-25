@@ -70,6 +70,8 @@ export type MappedData = {
   orders: SyncedOrder[];
   storeMarketplaces: { sid: string; name: string; marketplace: Marketplace | null; source: string }[];
   warnings: SyncWarning[];
+  /** Units counted per raw status, to check the in-production and in-transit totals against the ERP. */
+  diagnostics: Record<string, [string, number][]>;
 };
 
 const str = (v: unknown) => (v == null ? "" : String(v).trim());
@@ -158,9 +160,21 @@ function splitByWeight(total: number, weights: number[]): number[] {
 }
 
 const SHIPMENT_VOID = /取消|作废|删除|草稿|cancel|void|deleted|draft/i;
-const SHIPMENT_NOT_SHIPPED = /待发|未发|待出库|待审|计划|working|plan/i;
+const SHIPMENT_NOT_SHIPPED = /待发|未发|待配|待出库|待审|计划|working|plan/i;
+const SHIPMENT_SHIPPED = /已发|运输|在途|shipped|in.?transit/i;
 const SHIPMENT_DONE = /已完成|已关闭|完结|closed|completed/i;
 const SHIPMENT_ARRIVED = /签收|到仓|收货|接收|入库|receiv|checked.?in|delivered/i;
+
+/** Numeric purchase-order status (1 待下单, 2 待到货) from its text, for ERPs that only send status_text. */
+function purchaseStatusFromText(text: unknown) {
+  const t = str(text);
+  if (/待到货|待签收|部分入库|部分到货/.test(t)) return 2;
+  if (/待下单/.test(t)) return 1;
+  return 0;
+}
+
+const RECEIVED_KEYS = ["received_qty", "quantity_received", "receive_qty", "receive_num"];
+const hasAny = (row: Row, keys: string[]) => keys.some((k) => row[k] != null && str(row[k]) !== "");
 
 /** First field present (non-empty) among the candidates, as a number; 0 when none. */
 function firstNum(row: Row, keys: string[]) {
@@ -365,14 +379,38 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
   for (const h of snap.shipments) if (str(h.shipment_id)) headerById.set(str(h.shipment_id), h);
   const coveredHeaders = new Set<string>();
   const shipAgg = new Map<string, SyncedShipment>();
+  const inTransitByStatus = new Map<string, number>();
   for (const d of snap.deliveryOrders) {
     const shipmentId = str(d.shipment_id);
     const h = headerById.get(shipmentId);
     if (h) coveredHeaders.add(shipmentId);
     const statusText = `${str(d.status_text)} ${str(h?.status_text)} ${str(h?.amazon_status)}`;
+    const statusKey = str(d.status_text) || "（空）";
     const label = shipmentId || str(d.delivery_order_no) || `发货单 ${str(d.id)}`;
-    if (SHIPMENT_VOID.test(statusText)) continue;
-    if (!str(d.shipped_at) && SHIPMENT_NOT_SHIPPED.test(statusText)) continue;
+    if (SHIPMENT_VOID.test(statusText) || SHIPMENT_DONE.test(statusText)) continue;
+    const shipped = dateOf(d.shipped_at) != null || (SHIPMENT_SHIPPED.test(statusText) && !SHIPMENT_NOT_SHIPPED.test(str(d.status_text)));
+    if (!shipped) continue;
+    const items = ((d.item_list as Row[] | undefined) ?? []).map((it) => ({
+      it,
+      sku: localSku(it, "msku", "seller_sku"),
+      shipped: firstNum(it, ["shipped_qty", "quantity_shipped", "ship_qty", "quantity", "qty", "num"]),
+      received: hasAny(it, RECEIVED_KEYS) ? firstNum(it, RECEIVED_KEYS) : null,
+    }));
+    if (!items.length) {
+      warnings.add("delivery_no_items", "FBA 发货单没有商品明细，未计入在途货件", label);
+      continue;
+    }
+    // Lines without their own received quantity share the order's (shipped - received) in proportion to quantity.
+    const lineShipped = items.reduce((a, x) => a + x.shipped, 0);
+    const orderShipped = num(d.shipped_qty) || lineShipped;
+    const orderLeft = Math.max(0, orderShipped - num(d.received_qty));
+    const shares = items.every((x) => x.received != null)
+      ? items.map((x) => Math.max(0, x.shipped - (x.received ?? 0)))
+      : lineShipped > 0
+        ? splitByWeight(Math.min(orderLeft, lineShipped), items.map((x) => x.shipped))
+        : items.map(() => 0);
+    const left = shares.reduce((a, b) => a + b, 0);
+    if (left <= 0) continue;
     const mp =
       guessMarketplace(h?.country) ??
       guessMarketplace(h?.site) ??
@@ -380,41 +418,34 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
       (storeByName.get(str(d.store_name)) || null) ??
       guessMarketplace(d.store_name) ??
       guessMarketplace(d.destination);
-    const items = (d.item_list as Row[] | undefined) ?? [];
-    if (!items.length) {
-      warnings.add("delivery_no_items", "FBA 发货单没有商品明细，未计入在途货件", label);
-      continue;
-    }
     if (!mp) {
       warnings.add("shipment_no_marketplace", "货件无法识别站点（货件的国家/站点/目的地和发货单店铺都没有国家信息），已跳过", label);
       continue;
     }
-    const orderReceived = num(d.received_qty) > 0 || SHIPMENT_ARRIVED.test(statusText);
+    inTransitByStatus.set(statusKey, (inTransitByStatus.get(statusKey) ?? 0) + left);
+    const arrived = num(d.received_qty) > 0 || SHIPMENT_ARRIVED.test(statusText);
     const method = shipMethod(`${str(h?.shipment_type)} ${str(h?.logistics_channel)} ${str(h?.carrier)} ${str(d.carrier)}`);
     const shipDate = dateOf(d.shipped_at) ?? dateOf(h?.expected_ship_date);
     const eta = dateOf(h?.expected_arrival_date);
-    for (const it of items) {
-      const sku = localSku(it, "msku", "seller_sku");
-      const shipped = firstNum(it, ["shipped_qty", "quantity_shipped", "ship_qty", "quantity", "qty", "num"]);
-      const received = firstNum(it, ["received_qty", "quantity_received", "receive_qty", "receive_num"]);
-      const qty = shipped - received;
-      if (!sku || qty <= 0) continue;
-      touch(sku, mp, it.asin, it.product_name ?? it.name);
-      const k = `${label}|${sku}|${mp}`;
+    items.forEach((x, i) => {
+      const qty = shares[i];
+      if (!x.sku || qty <= 0) return;
+      touch(x.sku, mp, x.it.asin, x.it.product_name ?? x.it.name);
+      const k = `${label}|${x.sku}|${mp}`;
       const cur = shipAgg.get(k);
       if (cur) cur.qty += qty;
       else
         shipAgg.set(k, {
           shipment_no: label,
-          sku,
+          sku: x.sku,
           marketplace: mp,
           qty,
           method,
-          status: orderReceived || received > 0 ? "已到仓·入库中" : "运输中",
+          status: arrived || (x.received ?? 0) > 0 ? "已到仓·入库中" : "运输中",
           ship_date: shipDate,
           eta,
         });
-    }
+    });
   }
   for (const [id, h] of headerById) {
     const statusText = `${str(h.status_text)} ${str(h.amazon_status)}`;
@@ -472,12 +503,16 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     inv(touch(sku, mp)).domestic_wh += qty;
   }
 
-  // Purchase orders that are approved or placed and still awaiting delivery count as "in production".
+  // Purchase orders that are approved (1 待下单) or placed (2 待到货) count as "in production" with their
+  // awaiting-delivery quantity. Some ERPs leave the numeric status empty and only send status_text.
+  const pendingByStatus = new Map<string, number>();
   for (const po of snap.purchaseOrders) {
-    const status = num(po.status);
+    const statusKey = `${str(po.status) || "（空）"} ${str(po.status_text)}`.trim();
+    const status = str(po.status) !== "" ? num(po.status) : purchaseStatusFromText(po.status_text);
+    const lines = ((po.item_list as Row[] | undefined) ?? []).filter((it) => num(it.is_delete) !== 1);
+    pendingByStatus.set(statusKey, (pendingByStatus.get(statusKey) ?? 0) + lines.reduce((a, it) => a + num(it.quantity_receive), 0));
     if (status !== 1 && status !== 2) continue;
-    for (const it of (po.item_list as Row[] | undefined) ?? []) {
-      if (num(it.is_delete) === 1) continue;
+    for (const it of lines) {
       const qty = num(it.quantity_receive);
       const sku = localSku(it);
       if (!sku || qty <= 0) continue;
@@ -509,6 +544,7 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     });
   }
 
+  const ranked = (m: Map<string, number>) => [...m.entries()].sort((a, b) => b[1] - a[1]);
   return {
     skus,
     inventory,
@@ -517,5 +553,9 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     orders,
     storeMarketplaces,
     warnings: warnings.list(),
+    diagnostics: {
+      "采购单待到货件数按状态（计入在产：待下单、待到货、部分入库）": ranked(pendingByStatus),
+      "FBA发货单计入在途的件数按状态": ranked(inTransitByStatus),
+    },
   };
 }
