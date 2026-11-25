@@ -17,6 +17,7 @@ export type SyncSummary = {
   skus: number;
   inventory: number;
   salesRows: number;
+  stockoutDays: number;
   shipments: number;
   orders: number;
   deactivated: number;
@@ -133,17 +134,25 @@ async function writeData(q: Query, data: MappedData, today: string) {
   if (firstSync) await clearBusinessData(q);
 
   for (const s of data.skus) {
+    const measured = data.transitDays[s.marketplace] ?? {};
+    // Measured transit days replace defaults and earlier measurements, never values imported by hand.
     await q(
       `insert into skus (sku, marketplace, asin, name, category, owner, unit_cost, case_pack, moq,
-         production_days, sea_days, air_days, receiving_days)
+         production_days, sea_days, air_days, receiving_days, transit_source)
        values ($1, $2::text, $3, $4, $5, $6, coalesce($7::numeric, 0), coalesce($8::int, 1), coalesce($9::int, 0),
-         coalesce($10::int, 20), case when $2::text = 'US' then 30 else 40 end, 10, 10)
+         coalesce($10::int, 20), coalesce($11::int, case when $2::text = 'US' then 30 else 40 end), coalesce($12::int, 10), 10,
+         case when $11::int is not null or $12::int is not null then 'erp' else 'default' end)
        on conflict (sku, marketplace) do update set
          asin = coalesce($3, skus.asin), name = $4, category = coalesce($5, skus.category),
          owner = coalesce($6, skus.owner), unit_cost = coalesce($7::numeric, skus.unit_cost),
          case_pack = coalesce($8::int, skus.case_pack), moq = coalesce($9::int, skus.moq),
-         production_days = coalesce($10::int, skus.production_days), active = true, updated_at = now()`,
-      [s.sku, s.marketplace, s.asin, s.name, s.category, s.owner, s.unit_cost, s.case_pack, s.moq, s.production_days],
+         production_days = coalesce($10::int, skus.production_days),
+         sea_days = case when skus.transit_source = 'manual' then skus.sea_days else coalesce($11::int, skus.sea_days) end,
+         air_days = case when skus.transit_source = 'manual' then skus.air_days else coalesce($12::int, skus.air_days) end,
+         transit_source = case when skus.transit_source = 'manual' then 'manual'
+           when $11::int is not null or $12::int is not null then 'erp' else skus.transit_source end,
+         active = true, updated_at = now()`,
+      [s.sku, s.marketplace, s.asin, s.name, s.category, s.owner, s.unit_cost, s.case_pack, s.moq, s.production_days, measured.sea ?? null, measured.air ?? null],
     );
   }
   const keys = data.skus.map((s) => `${s.sku}|${s.marketplace}`);
@@ -198,11 +207,12 @@ async function writeData(q: Query, data: MappedData, today: string) {
   ]);
   await q(
     `insert into daily_sales (sku_id, date, units, in_stock)
-     select u.*, true from unnest($1::int[], $2::date[], $3::int[]) as u`,
+     select * from unnest($1::int[], $2::date[], $3::int[], $4::boolean[])`,
     [
       data.sales.map((s) => ids.get(`${s.sku}|${s.marketplace}`)!),
       data.sales.map((s) => s.date),
       data.sales.map((s) => s.units),
+      data.sales.map((s) => s.in_stock),
     ],
   );
 
@@ -290,7 +300,8 @@ export async function runErpSync(triggeredBy: string): Promise<SyncRun> {
       firstSync: written.firstSync,
       skus: data.skus.length,
       inventory: data.skus.length,
-      salesRows: data.sales.length,
+      salesRows: data.sales.filter((s) => s.in_stock).length,
+      stockoutDays: data.sales.filter((s) => !s.in_stock).length,
       shipments: data.shipments.length,
       orders: data.orders.length,
       deactivated: written.deactivated,

@@ -251,16 +251,18 @@ export async function runImport(type: ImportType, buffer: ArrayBuffer): Promise<
         if (type === "skus") {
           const r = await q<{ inserted: boolean }>(
             `insert into skus (sku, marketplace, asin, name, category, owner, unit_cost, case_pack, moq,
-               production_days, sea_days, air_days, receiving_days)
+               production_days, sea_days, air_days, receiving_days, transit_source)
              values ($1, $2::text, $3, $4, $5, $6, coalesce($7::numeric, 0), coalesce($8::int, 1), coalesce($9::int, 0),
                coalesce($10::int, 20), coalesce($11::int, case when $2::text = 'US' then 30 else 40 end),
-               coalesce($12::int, 10), coalesce($13::int, 10))
+               coalesce($12::int, 10), coalesce($13::int, 10),
+               case when $11::int is not null or $12::int is not null then 'manual' else 'default' end)
              on conflict (sku, marketplace) do update set
                asin = coalesce($3, skus.asin), name = $4, category = coalesce($5, skus.category),
                owner = coalesce($6, skus.owner), unit_cost = coalesce($7::numeric, skus.unit_cost),
                case_pack = coalesce($8::int, skus.case_pack), moq = coalesce($9::int, skus.moq),
                production_days = coalesce($10::int, skus.production_days), sea_days = coalesce($11::int, skus.sea_days),
                air_days = coalesce($12::int, skus.air_days), receiving_days = coalesce($13::int, skus.receiving_days),
+               transit_source = case when $11::int is not null or $12::int is not null then 'manual' else skus.transit_source end,
                active = true, updated_at = now()
              returning (xmax = 0) as inserted`,
             [d.sku, d.marketplace, d.asin, d.name, d.category, d.owner, d.unit_cost, d.case_pack, d.moq, d.production_days, d.sea_days, d.air_days, d.receiving_days],

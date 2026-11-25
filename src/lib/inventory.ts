@@ -14,6 +14,7 @@ import { getReplenishmentSettings } from "./settings";
 import type { StockStatus } from "./constants";
 
 export type SkuRow = SkuInput & {
+  transit_source: "default" | "erp" | "manual";
   asin: string | null;
   category: string | null;
   owner: string | null;
@@ -36,7 +37,7 @@ export async function getPromotions(): Promise<Required<Promotion>[]> {
 }
 
 const SKU_COLUMNS = `s.id, s.sku, s.marketplace, s.asin, s.name, s.category, s.owner, s.unit_cost::float8 as unit_cost,
-  s.case_pack, s.moq, s.production_days, s.sea_days, s.air_days, s.receiving_days,
+  s.case_pack, s.moq, s.production_days, s.sea_days, s.air_days, s.receiving_days, s.transit_source,
   coalesce(i.fba_available, 0) as fba_available, coalesce(i.fba_inbound, 0) as fba_inbound,
   coalesce(i.in_transit, 0) as in_transit, coalesce(i.overseas_wh, 0) as overseas_wh,
   coalesce(i.domestic_wh, 0) as domestic_wh, coalesce(i.in_production, 0) as in_production,

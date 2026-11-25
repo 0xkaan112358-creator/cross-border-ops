@@ -24,6 +24,8 @@ function Metric({ label, value, hint }: { label: string; value: React.ReactNode;
   );
 }
 
+const TRANSIT_SOURCE_LABEL: Record<string, string> = { default: "站点默认值", erp: "ERP 历史货件实测", manual: "手动填写" };
+
 const SEGMENTS = [
   { key: "fba_available", label: "FBA 可售", color: "bg-emerald-500" },
   { key: "fba_inbound", label: "FBA 入库中", color: "bg-emerald-300" },
@@ -150,7 +152,7 @@ export default async function SkuDetailPage(props: PageProps<"/inventory/[id]">)
         <Metric
           label="全程提前期"
           value={`${plan.leadTime} 天`}
-          hint={`生产 ${row.production_days} + 海运 ${row.sea_days} + 上架 ${row.receiving_days}`}
+          hint={`生产 ${row.production_days} + 海运 ${row.sea_days}（${TRANSIT_SOURCE_LABEL[row.transit_source] ?? "默认"}）+ 上架 ${row.receiving_days}`}
         />
       </div>
 

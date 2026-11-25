@@ -1,5 +1,6 @@
 import { normalizeMarketplace, type Marketplace } from "../constants";
-import { addDays } from "../dates";
+import { addDays, diffDays } from "../dates";
+import { inferStockoutDays } from "../stockout";
 
 type Row = Record<string, unknown>;
 
@@ -65,11 +66,14 @@ export type SyncWarning = { code: string; message: string; samples: string[] };
 export type MappedData = {
   skus: SyncedSku[];
   inventory: Map<string, SyncedInventory>;
-  sales: { sku: string; marketplace: Marketplace; date: string; units: number }[];
+  /** Days with sales, plus inferred out-of-stock days (units 0, in_stock false). */
+  sales: { sku: string; marketplace: Marketplace; date: string; units: number; in_stock: boolean }[];
   shipments: SyncedShipment[];
   orders: SyncedOrder[];
   storeMarketplaces: { sid: string; name: string; marketplace: Marketplace | null; source: string }[];
   warnings: SyncWarning[];
+  /** Median first-mile transit days measured from delivered FBA shipments, per marketplace and method (≥ 3 samples). */
+  transitDays: Partial<Record<Marketplace, { sea?: number; air?: number }>>;
   /** Units counted per raw status, to check the in-production and in-transit totals against the ERP. */
   diagnostics: Record<string, [string, number][]>;
 };
@@ -193,6 +197,22 @@ function firstNum(row: Row, keys: string[]) {
   return 0;
 }
 
+const MIN_TRANSIT_SAMPLES = 3;
+const TRANSIT_RANGE: Record<"sea" | "air", [number, number]> = { sea: [10, 90], air: [2, 30] };
+
+/** Sea or air only when the text says so; unlike shipMethod, unknown stays unknown so it cannot skew a median. */
+function explicitMode(text: string): "sea" | "air" | null {
+  if (/空运|空派|air/i.test(text)) return "air";
+  if (/海运|海派|普船|快船|美森|sea|ocean/i.test(text)) return "sea";
+  return null;
+}
+
+function median(values: number[]) {
+  const v = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : Math.round((v[mid - 1] + v[mid]) / 2);
+}
+
 function shipMethod(text: string) {
   if (/空运|air/i.test(text)) return "air";
   if (/铁路|卡航|rail|train/i.test(text)) return "rail";
@@ -306,7 +326,7 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
   }
   const sales = [...salesAgg.entries()].map(([k, units]) => {
     const [sku, marketplace, date] = k.split("|");
-    return { sku, marketplace: marketplace as Marketplace, date, units };
+    return { sku, marketplace: marketplace as Marketplace, date, units, in_stock: true };
   });
 
   const soldBySkuMp = new Map<string, number>();
@@ -390,6 +410,42 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
   for (const h of snap.shipments) if (str(h.shipment_id)) headerById.set(str(h.shipment_id), h);
   const coveredHeaders = new Set<string>();
   const shipAgg = new Map<string, SyncedShipment>();
+  const shipmentMarketplace = (d: Row, h: Row | undefined): Marketplace | null =>
+    guessMarketplace(h?.country) ??
+    guessMarketplace(h?.site) ??
+    guessMarketplace(h?.destination) ??
+    (storeByName.get(str(d.store_name)) || null) ??
+    guessMarketplace(d.store_name) ??
+    guessMarketplace(d.destination);
+
+  // First-mile transit days (shipped -> signed for at the FBA warehouse) from delivered shipments.
+  const transitSamples = new Map<string, number[]>();
+  for (const d of snap.deliveryOrders) {
+    const h = headerById.get(str(d.shipment_id));
+    const shippedOn = dateOf(d.shipped_at);
+    const receivedOn = dateOf(d.received_at);
+    const mode = explicitMode(`${str(h?.shipment_type)} ${str(h?.logistics_channel)} ${str(h?.carrier)} ${str(d.carrier)}`);
+    const mp = shipmentMarketplace(d, h);
+    if (!shippedOn || !receivedOn || !mode || !mp) continue;
+    const days = diffDays(receivedOn, shippedOn);
+    const [min, max] = TRANSIT_RANGE[mode];
+    if (days < min || days > max) continue;
+    const k = `${mp}|${mode}`;
+    transitSamples.set(k, [...(transitSamples.get(k) ?? []), days]);
+  }
+  const transitDays: MappedData["transitDays"] = {};
+  const transitDiag: [string, number][] = [];
+  for (const [k, samples] of transitSamples) {
+    const [mp, mode] = k.split("|") as [Marketplace, "sea" | "air"];
+    const m = median(samples);
+    const used = samples.length >= MIN_TRANSIT_SAMPLES;
+    if (used) (transitDays[mp] ??= {})[mode] = m;
+    transitDiag.push([
+      `${mp} ${mode === "sea" ? "海运" : "空运"}｜中位数 ${m} 天（${Math.min(...samples)}～${Math.max(...samples)} 天）${used ? "" : `，样本少于 ${MIN_TRANSIT_SAMPLES} 票未采用`}`,
+      samples.length,
+    ]);
+  }
+
   const inTransitByStatus = new Map<string, number>();
   const outcomes = new Map<string, { orders: number; shipped: number; received: number }>();
   for (const d of snap.deliveryOrders) {
@@ -445,13 +501,7 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
       outcome("已收完");
       continue;
     }
-    const mp =
-      guessMarketplace(h?.country) ??
-      guessMarketplace(h?.site) ??
-      guessMarketplace(h?.destination) ??
-      (storeByName.get(str(d.store_name)) || null) ??
-      guessMarketplace(d.store_name) ??
-      guessMarketplace(d.destination);
+    const mp = shipmentMarketplace(d, h);
     if (!mp) {
       outcome("无法识别站点");
       warnings.add("shipment_no_marketplace", "货件无法识别站点（货件的国家/站点/目的地和发货单店铺都没有国家信息），已跳过", label);
@@ -572,6 +622,29 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     }
   }
 
+  // Out-of-stock days inferred from the sales series, so the forecast excludes them like imported "是否有货=否" rows.
+  const salesByKey = new Map<string, Map<string, number>>();
+  for (const s of sales) {
+    const k = keyOf(s.sku, s.marketplace);
+    const m = salesByKey.get(k) ?? new Map<string, number>();
+    m.set(s.date, s.units);
+    salesByKey.set(k, m);
+  }
+  const stockoutDiag: [string, number][] = [];
+  for (const [k, byDate] of salesByKey) {
+    const [sku, marketplace] = k.split("|") as [string, Marketplace];
+    const { days, rate } = inferStockoutDays(byDate, salesStart, today, inventory.get(k)?.fba_available ?? 0);
+    if (!days.length) continue;
+    for (const date of days) sales.push({ sku, marketplace, date, units: 0, in_stock: false });
+    stockoutDiag.push([`${sku}｜${marketplace}｜有货日均 ${rate} 件｜${days[0]} 起`, days.length]);
+    warnings.add(
+      "stockout_inferred",
+      "按销量推断出断货日（平时有稳定销量，却连续多天零销量，或至今零销量且 FBA 可售为 0），已从日均销量中剔除",
+      `${sku} ${marketplace} ${days.length} 天`,
+    );
+  }
+  stockoutDiag.sort((a, b) => b[1] - a[1]);
+
   // SKU master rows for every SKU x marketplace seen above.
   const skus: SyncedSku[] = [];
   for (const m of skuMeta.values()) {
@@ -600,7 +673,10 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     orders,
     storeMarketplaces,
     warnings: warnings.list(),
+    transitDays,
     diagnostics: {
+      "推断的断货日（SKU｜站点，断货天数）": stockoutDiag.slice(0, 15),
+      "头程时效实测（发货到签收，票数）": transitDiag,
       "采购单待到货件数按状态（计入在产：待下单、待到货、部分入库）": ranked(pendingByStatus),
       "采购单明细数量字段合计按状态（张数）": [...poFields.entries()]
         .sort((a, b) => b[1].orders - a[1].orders)

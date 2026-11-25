@@ -142,6 +142,11 @@ function LastRun({ run }: { run: SyncRun }) {
         <Stat label="在途货件明细" value={s.shipments} />
         <Stat label="订单" value={s.orders} />
       </div>
+      {!!s.stockoutDays && (
+        <p className="text-xs text-muted-foreground">
+          按销量推断出 {s.stockoutDays} 个 SKU × 日期处于断货，已从日均销量中剔除，明细见“ERP 原始数据”中的“推断的断货日”。
+        </p>
+      )}
       {!!s.deactivated && (
         <p className="text-xs text-muted-foreground">另有 {s.deactivated} 个 SKU × 站点本次在 ERP 中没有库存、销量或货件，已从库存列表中隐藏。</p>
       )}

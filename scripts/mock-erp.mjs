@@ -69,16 +69,27 @@ const shipments = [
   { id: 4, shipment_id: "FBA18CANCEL", shipment_type: "海运", country: "英国", status_text: "已取消", amazon_status: "CANCELLED", received_qty: 0 },
   { id: 5, shipment_id: "FBA18NOLINES", shipment_type: "海运", country: "美国", status_text: "运输中", expected_arrival_date: daysAgo(-15), received_qty: 0 },
 ];
+// Delivered US sea shipments (shipped -> signed 29 / 33 days), used to measure first-mile transit time.
+const doneSea = [
+  { shipment_id: "FBA18DONE2", ship: 70, recv: 41 },
+  { shipment_id: "FBA18DONE3", ship: 90, recv: 57 },
+];
+for (const d of doneSea) {
+  shipments.push({ id: shipments.length + 1, shipment_id: d.shipment_id, shipment_type: "海运", country: "美国", site: "Amazon.com", status_text: "已完成", amazon_status: "CLOSED", received_qty: 100 });
+}
 const deliveryOrders = [
   { id: 1, delivery_order_no: "FD-MOCK-001", shipment_id: "FBA18MOCKUS1", store_name: "Acme-US", status_text: "已发货", shipped_qty: 800, received_qty: 0, shipped_at: daysAgo(12),
     item_list: [{ sku: "BOT-750", msku: "BOT-750-US", asin: "B0MOCK0001", product_name: "保温杯", shipped_qty: 600, received_qty: 0 }, { sku: "YOGA-6MM", msku: "YOGA-6MM-US", shipped_qty: 200, received_qty: 0 }] },
   { id: 2, delivery_order_no: "FD-MOCK-002", shipment_id: "FBA18MOCKDE1", store_name: "Acme-DE", status_text: "已发货", shipped_qty: 200, received_qty: 50, shipped_at: daysAgo(5),
     item_list: [{ sku: "LAMP-01", msku: "LAMP-01-EU", shipped_qty: 200, received_qty: 50 }] },
-  { id: 3, delivery_order_no: "FD-MOCK-003", shipment_id: "FBA18DONE", store_name: "Acme-US", status_text: "已完成", shipped_qty: 999, received_qty: 999, shipped_at: daysAgo(40),
+  { id: 3, delivery_order_no: "FD-MOCK-003", shipment_id: "FBA18DONE", store_name: "Acme-US", status_text: "已完成", shipped_qty: 999, received_qty: 999, shipped_at: daysAgo(40), received_at: daysAgo(8),
     item_list: [{ sku: "BOT-750", shipped_qty: 999, received_qty: 999 }] },
   { id: 4, delivery_order_no: "FD-MOCK-004", shipment_id: "FBA18CANCEL", store_name: "Acme-UK", status_text: "已取消", shipped_qty: 0, item_list: [{ sku: "BOT-750", shipped_qty: 300, received_qty: 0 }] },
   { id: 5, delivery_order_no: "FD-MOCK-005", shipment_id: "FBA18PLAN", store_name: "Acme-US", status_text: "待发货", shipped_qty: 0, shipped_at: "", item_list: [{ sku: "YOGA-6MM", shipped_qty: 100, received_qty: 0 }] },
 ];
+for (const d of doneSea) {
+  deliveryOrders.push({ id: deliveryOrders.length + 1, delivery_order_no: `FD-${d.shipment_id}`, shipment_id: d.shipment_id, store_name: "Acme-US", status_text: "已完成", shipped_qty: 100, received_qty: 100, shipped_at: daysAgo(d.ship), received_at: daysAgo(d.recv), item_list: [{ sku: "BOT-750", quantity: 100 }] });
+}
 
 function buildOrders() {
   const plan = [
@@ -94,6 +105,8 @@ function buildOrders() {
   for (let d = 59; d >= 0; d--) {
     const date = daysAgo(d);
     for (const p of plan) {
+      // YOGA-6MM was out of stock 20-26 days ago.
+      if (p.sku === "YOGA-6MM" && d >= 20 && d <= 26) continue;
       const units = Math.max(0, Math.round(p.base * (1 + 0.25 * Math.sin(d / 3 + p.base))));
       // Split a day's units into orders of 1-3 pieces.
       let left = units;
