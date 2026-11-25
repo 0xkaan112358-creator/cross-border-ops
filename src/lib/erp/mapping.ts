@@ -173,6 +173,17 @@ function purchaseStatusFromText(text: unknown) {
   return 0;
 }
 
+/**
+ * Units still to arrive on a purchase-order line: the ERP's own 待到货量 when it is filled in, otherwise
+ * 实际采购量 (or quantity / 计划采购量) minus 到货入库量.
+ */
+function poPending(it: Row) {
+  const receive = num(it.quantity_receive);
+  if (receive > 0) return receive;
+  const ordered = num(it.quantity_real) || num(it.quantity) || num(it.quantity_plan);
+  return Math.max(0, ordered - num(it.quantity_entry));
+}
+
 const RECEIVED_KEYS = ["received_qty", "quantity_received", "receive_qty", "receive_num"];
 const hasAny = (row: Row, keys: string[]) => keys.some((k) => row[k] != null && str(row[k]) !== "");
 
@@ -531,14 +542,25 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
   // Purchase orders that are approved (1 待下单) or placed (2 待到货) count as "in production" with their
   // awaiting-delivery quantity. Some ERPs leave the numeric status empty and only send status_text.
   const pendingByStatus = new Map<string, number>();
+  const poFields = new Map<string, { orders: number; plan: number; real: number; quantity: number; entry: number; receive: number }>();
   for (const po of snap.purchaseOrders) {
     const statusKey = `${str(po.status) || "（空）"} ${str(po.status_text)}`.trim();
     const status = str(po.status) !== "" ? num(po.status) : purchaseStatusFromText(po.status_text);
     const lines = ((po.item_list as Row[] | undefined) ?? []).filter((it) => num(it.is_delete) !== 1);
-    pendingByStatus.set(statusKey, (pendingByStatus.get(statusKey) ?? 0) + lines.reduce((a, it) => a + num(it.quantity_receive), 0));
+    pendingByStatus.set(statusKey, (pendingByStatus.get(statusKey) ?? 0) + lines.reduce((a, it) => a + poPending(it), 0));
+    const f = poFields.get(statusKey) ?? { orders: 0, plan: 0, real: 0, quantity: 0, entry: 0, receive: 0 };
+    f.orders++;
+    for (const it of lines) {
+      f.plan += num(it.quantity_plan);
+      f.real += num(it.quantity_real);
+      f.quantity += num(it.quantity);
+      f.entry += num(it.quantity_entry);
+      f.receive += num(it.quantity_receive);
+    }
+    poFields.set(statusKey, f);
     if (status !== 1 && status !== 2) continue;
     for (const it of lines) {
-      const qty = num(it.quantity_receive);
+      const qty = poPending(it);
       const sku = localSku(it);
       if (!sku || qty <= 0) continue;
       const mp = mpOfStore(it.sid) ?? primaryMarketplace(sku);
@@ -580,6 +602,12 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     warnings: warnings.list(),
     diagnostics: {
       "采购单待到货件数按状态（计入在产：待下单、待到货、部分入库）": ranked(pendingByStatus),
+      "采购单明细数量字段合计按状态（张数）": [...poFields.entries()]
+        .sort((a, b) => b[1].orders - a[1].orders)
+        .map(([k, f]) => [
+          `${k}｜计划 ${f.plan} / 实际 ${f.real} / quantity ${f.quantity} / 入库 ${f.entry} / 待到货字段 ${f.receive}`,
+          f.orders,
+        ]),
       "FBA发货单计入在途的件数按状态": ranked(inTransitByStatus),
       "FBA发货单处理结果（张数；括号内为整单已发/已收件数合计）": [...outcomes.entries()]
         .sort((a, b) => b[1].orders - a[1].orders)
