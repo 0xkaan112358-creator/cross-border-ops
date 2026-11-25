@@ -287,6 +287,9 @@ export async function ticketStats() {
     processed: number;
     auto_sent: number;
     auto_sent_unchanged: number;
+    handle_minutes: number | null;
+    handle_minutes_auto: number | null;
+    handle_minutes_human: number | null;
   }>(
     `select count(*)::int as total,
        count(*) filter (where status = 'pending_human')::int as pending_human,
@@ -296,7 +299,13 @@ export async function ticketStats() {
        count(*) filter (where route = 'auto')::int as auto_routed,
        count(*) filter (where route is not null)::int as processed,
        count(*) filter (where status = 'sent' and route = 'auto')::int as auto_sent,
-       count(*) filter (where status = 'sent' and route = 'auto' and final_reply = reply_draft)::int as auto_sent_unchanged
+       count(*) filter (where status = 'sent' and route = 'auto' and final_reply = reply_draft)::int as auto_sent_unchanged,
+       (avg(extract(epoch from sent_at - received_at)) filter (where status = 'sent' and sent_at >= received_at) / 60)::float8
+         as handle_minutes,
+       (avg(extract(epoch from sent_at - received_at)) filter (where status = 'sent' and sent_at >= received_at and route = 'auto') / 60)::float8
+         as handle_minutes_auto,
+       (avg(extract(epoch from sent_at - received_at)) filter (where status = 'sent' and sent_at >= received_at and route = 'human') / 60)::float8
+         as handle_minutes_human
      from tickets`,
   );
   const intents = await sql<{ intent: string; n: number }>(

@@ -39,6 +39,9 @@ export default async function TicketsPage() {
         processed: stats.processed,
         autoSent: stats.auto_sent,
         autoSentUnchanged: stats.auto_sent_unchanged,
+        handleMinutes: stats.handle_minutes,
+        handleMinutesAuto: stats.handle_minutes_auto,
+        handleMinutesHuman: stats.handle_minutes_human,
       }}
       threshold={cs.confidenceThreshold}
     />

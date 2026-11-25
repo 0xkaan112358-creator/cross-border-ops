@@ -45,6 +45,10 @@ type Stats = {
   processed: number;
   autoSent: number;
   autoSentUnchanged: number;
+  /** Average minutes from receiving a message to sending the reply, over replied tickets. */
+  handleMinutes: number | null;
+  handleMinutesAuto: number | null;
+  handleMinutesHuman: number | null;
 };
 
 const TABS = [
@@ -56,6 +60,13 @@ const TABS = [
 type TabKey = (typeof TABS)[number]["key"];
 
 const TEMPLATE_URL = "/api/import/tickets";
+
+function duration(minutes: number | null) {
+  if (minutes == null) return "—";
+  if (minutes < 60) return `${Math.max(1, Math.round(minutes))} 分钟`;
+  if (minutes < 48 * 60) return `${(minutes / 60).toFixed(1)} 小时`;
+  return `${(minutes / 1440).toFixed(1)} 天`;
+}
 
 function pct(n: number, d: number) {
   return d > 0 ? `${Math.round((n / d) * 100)}%` : "—";
@@ -160,7 +171,7 @@ export function TicketBoard({ items, stats, threshold }: { items: TicketListItem
         }
       />
 
-      <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-5">
         <Card size="sm">
           <CardContent>
             <div className="text-xs text-muted-foreground">待人工处理</div>
@@ -188,6 +199,15 @@ export function TicketBoard({ items, stats, threshold }: { items: TicketListItem
             <div className="mt-1 text-xl font-semibold tabular-nums">{pct(stats.autoSentUnchanged, stats.autoSent)}</div>
             <div className="text-xs text-muted-foreground">
               AI 草稿未修改直接发出 {stats.autoSentUnchanged} / {stats.autoSent}
+            </div>
+          </CardContent>
+        </Card>
+        <Card size="sm" className="col-span-2 lg:col-span-1">
+          <CardContent>
+            <div className="text-xs text-muted-foreground">平均处理时长</div>
+            <div className="mt-1 text-xl font-semibold tabular-nums">{duration(stats.handleMinutes)}</div>
+            <div className="text-xs text-muted-foreground">
+              收到到回复 · AI 草稿 {duration(stats.handleMinutesAuto)} · 人工 {duration(stats.handleMinutesHuman)}
             </div>
           </CardContent>
         </Card>
