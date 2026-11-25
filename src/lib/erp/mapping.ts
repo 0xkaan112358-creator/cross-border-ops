@@ -380,16 +380,35 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
   const coveredHeaders = new Set<string>();
   const shipAgg = new Map<string, SyncedShipment>();
   const inTransitByStatus = new Map<string, number>();
+  const outcomes = new Map<string, { orders: number; shipped: number; received: number }>();
   for (const d of snap.deliveryOrders) {
+    const outcome = (reason: string) => {
+      const k = `${str(d.status_text) || "（空）"}｜${reason}`;
+      const o = outcomes.get(k) ?? { orders: 0, shipped: 0, received: 0 };
+      o.orders++;
+      o.shipped += num(d.shipped_qty);
+      o.received += num(d.received_qty);
+      outcomes.set(k, o);
+    };
     const shipmentId = str(d.shipment_id);
     const h = headerById.get(shipmentId);
     if (h) coveredHeaders.add(shipmentId);
     const statusText = `${str(d.status_text)} ${str(h?.status_text)} ${str(h?.amazon_status)}`;
     const statusKey = str(d.status_text) || "（空）";
     const label = shipmentId || str(d.delivery_order_no) || `发货单 ${str(d.id)}`;
-    if (SHIPMENT_VOID.test(statusText) || SHIPMENT_DONE.test(statusText)) continue;
+    if (SHIPMENT_VOID.test(statusText)) {
+      outcome("已取消/作废");
+      continue;
+    }
+    if (SHIPMENT_DONE.test(statusText)) {
+      outcome("已完成/已关闭");
+      continue;
+    }
     const shipped = dateOf(d.shipped_at) != null || (SHIPMENT_SHIPPED.test(statusText) && !SHIPMENT_NOT_SHIPPED.test(str(d.status_text)));
-    if (!shipped) continue;
+    if (!shipped) {
+      outcome("未发货");
+      continue;
+    }
     const items = ((d.item_list as Row[] | undefined) ?? []).map((it) => ({
       it,
       sku: localSku(it, "msku", "seller_sku"),
@@ -397,6 +416,7 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
       received: hasAny(it, RECEIVED_KEYS) ? firstNum(it, RECEIVED_KEYS) : null,
     }));
     if (!items.length) {
+      outcome("没有商品明细");
       warnings.add("delivery_no_items", "FBA 发货单没有商品明细，未计入在途货件", label);
       continue;
     }
@@ -410,7 +430,10 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
         ? splitByWeight(Math.min(orderLeft, lineShipped), items.map((x) => x.shipped))
         : items.map(() => 0);
     const left = shares.reduce((a, b) => a + b, 0);
-    if (left <= 0) continue;
+    if (left <= 0) {
+      outcome("已收完");
+      continue;
+    }
     const mp =
       guessMarketplace(h?.country) ??
       guessMarketplace(h?.site) ??
@@ -419,9 +442,11 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
       guessMarketplace(d.store_name) ??
       guessMarketplace(d.destination);
     if (!mp) {
+      outcome("无法识别站点");
       warnings.add("shipment_no_marketplace", "货件无法识别站点（货件的国家/站点/目的地和发货单店铺都没有国家信息），已跳过", label);
       continue;
     }
+    outcome("计入在途");
     inTransitByStatus.set(statusKey, (inTransitByStatus.get(statusKey) ?? 0) + left);
     const arrived = num(d.received_qty) > 0 || SHIPMENT_ARRIVED.test(statusText);
     const method = shipMethod(`${str(h?.shipment_type)} ${str(h?.logistics_channel)} ${str(h?.carrier)} ${str(d.carrier)}`);
@@ -556,6 +581,9 @@ export function mapSnapshot(snap: ErpSnapshot, today: string, salesDays: number)
     diagnostics: {
       "采购单待到货件数按状态（计入在产：待下单、待到货、部分入库）": ranked(pendingByStatus),
       "FBA发货单计入在途的件数按状态": ranked(inTransitByStatus),
+      "FBA发货单处理结果（张数；括号内为整单已发/已收件数合计）": [...outcomes.entries()]
+        .sort((a, b) => b[1].orders - a[1].orders)
+        .map(([k, o]) => [`${k}（已发 ${o.shipped} / 已收 ${o.received}）`, o.orders]),
     },
   };
 }
